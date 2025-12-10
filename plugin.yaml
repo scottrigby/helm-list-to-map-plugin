@@ -1,0 +1,33 @@
+apiVersion: v1
+type: cli/v1
+name: "list-to-map"
+version: "0.1.0"
+runtime: subprocess
+config:
+  usage: "list-to-map [command] [flags]"
+  shortHelp: "Detect and convert list-with-unique-key values to maps"
+  longHelp: |
+    The list-to-map plugin converts Helm chart array values with unique keys into
+    map-based configurations, making values easier to override and reducing duplication.
+
+    Usage:
+      helm list-to-map [command] [flags]
+
+    Available Commands:
+      detect      scan values.yaml and report convertible arrays
+      convert     transform values.yaml and update templates
+      add-rule    add a custom conversion rule to your config
+      rules       list all active rules (built-in + custom)
+
+    Flags:
+      -h, --help   help for list-to-map
+
+    Use "helm list-to-map [command] --help" for more information about a command.
+runtimeConfig:
+  platformCommand:
+    - command: ${HELM_PLUGIN_DIR}/bin/list-to-map
+  platformHooks:
+    install:
+      - command: cd ${HELM_PLUGIN_DIR} && make build
+    update:
+      - command: cd ${HELM_PLUGIN_DIR} && make build

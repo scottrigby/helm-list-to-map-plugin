@@ -1,0 +1,35 @@
+name: list-to-map
+commands:
+  - name: detect
+    flags:
+      - chart
+      - config
+      - h
+      - help
+  - name: convert
+    flags:
+      - chart
+      - config
+      - dry-run
+      - backup-ext
+      - h
+      - help
+  - name: add-rule
+    flags:
+      - path
+      - uniqueKey
+      - renderer
+      - config
+      - h
+      - help
+    validArgs:
+      - env
+      - volumeMounts
+      - volumes
+      - ports
+      - containers
+      - generic
+  - name: rules
+    flags:
+      - h
+      - help
