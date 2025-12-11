@@ -6,11 +6,11 @@ For the problem statement, solution overview, installation, and usage, see [READ
 
 ## Overview
 
-The plugin uses Kubernetes API introspection to automatically detect convertible fields:
+The plugin uses Kubernetes API introspection and CRD schema parsing to automatically detect convertible fields:
 
 1. **Parses templates** to find `apiVersion` and `kind` of K8s resources being constructed
-2. **Maps to K8s Go types** (e.g., `apps/v1` + `Deployment` → `appsv1.Deployment`)
-3. **Reads [`patchMergeKey`](#the-patchmergekey-discovery) struct tags** from K8s API types to determine the unique key for each list field
+2. **Maps to K8s Go types** (e.g., `apps/v1` + `Deployment` → `appsv1.Deployment`) or looks up loaded CRD schemas
+3. **Reads [`patchMergeKey`](#the-patchmergekey-discovery) struct tags** from K8s API types, or [`x-kubernetes-list-map-keys`](#crd-schema-parsing) from CRD OpenAPI schemas
 4. **Converts values and templates** using a [single generic helper](#single-generic-helper)
 
 ## Why K8s API Introspection?
@@ -89,9 +89,58 @@ The helper accepts:
 
 This works because the transformation is structurally identical for all list types: iterate map entries, inject the key field, output as YAML list.
 
-## User Rules for CRDs
+## CRD Schema Parsing
 
-Custom Resource Definitions (CRDs) are not part of the K8s API packages, so the plugin cannot introspect them. Users can define rules manually. Example:
+Custom Resource Definitions (CRDs) are not part of the K8s API packages, but modern CRDs include OpenAPI v3 schemas with list-type annotations. The plugin extracts these to enable automatic detection for Custom Resources.
+
+### How It Works
+
+CRD YAML files contain OpenAPI schemas with Kubernetes-specific extensions:
+
+```yaml
+# From a CRD's spec.versions[].schema.openAPIV3Schema
+spec:
+  properties:
+    hostAliases:
+      type: array
+      items:
+        properties:
+          ip: ...
+          hostnames: ...
+      x-kubernetes-list-type: map
+      x-kubernetes-list-map-keys:
+        - ip
+```
+
+The plugin parses these annotations to determine:
+
+- **`x-kubernetes-list-type: map`**: Indicates the list has unique keys
+- **`x-kubernetes-list-map-keys`**: Specifies which field(s) form the unique key
+
+### Loading CRDs
+
+CRDs are loaded using the `load-crd` command and stored in the plugin's config directory:
+
+```bash
+# Load from local file
+helm list-to-map load-crd ./monitoring-crds.yaml
+
+# Load from URL
+helm list-to-map load-crd https://raw.githubusercontent.com/.../crd.yaml
+
+# View loaded CRDs
+helm list-to-map list-crds -v
+```
+
+CRDs are stored in `$HELM_CONFIG_HOME/list-to-map/crds/` and automatically loaded when running `detect` or `convert`.
+
+## Manual Rules
+
+For cases where automatic detection doesn't work, users can define rules manually:
+
+- **CRDs without schema annotations**: Many CRDs don't define `x-kubernetes-list-map-keys` in their OpenAPI schema
+- **Unavailable CRD definitions**: When CRD YAML files aren't accessible
+- **Custom conversion needs**: When you want to convert a field that isn't auto-detected
 
 ```bash
 helm list-to-map add-rule --path='istio.virtualService.http[]' --uniqueKey=name
@@ -102,6 +151,7 @@ User rules are stored in `$HELM_CONFIG_HOME/list-to-map/config.yaml` and supplem
 ## File Overview
 
 - `cmd/analyzer.go`: K8s type registry and field schema navigation using reflection
+- `cmd/crd.go`: CRD YAML parsing and registry for Custom Resource support
 - `cmd/parser.go`: Helm template parsing and directive extraction
 - `cmd/main.go`: CLI commands, value migration, and template rewriting
 

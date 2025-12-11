@@ -270,6 +270,7 @@ type DetectedCandidate struct {
 }
 
 // detectConversionCandidates scans templates for convertible fields using K8s API introspection
+// and CRD registry lookup
 func detectConversionCandidates(chartRoot string) ([]DetectedCandidate, error) {
 	var candidates []DetectedCandidate
 	seen := make(map[string]bool) // dedup by valuesPath
@@ -290,8 +291,12 @@ func detectConversionCandidates(chartRoot string) ([]DetectedCandidate, error) {
 			return nil // Skip problematic files
 		}
 
-		// Skip if no K8s type resolved (CRD or no apiVersion/kind)
-		if parsed.GoType == nil {
+		// Check if we can resolve this type (either built-in K8s or CRD)
+		hasCRDType := parsed.APIVersion != "" && parsed.Kind != "" &&
+			globalCRDRegistry.HasType(parsed.APIVersion, parsed.Kind)
+
+		// Skip if no K8s type resolved and no CRD type available
+		if parsed.GoType == nil && !hasCRDType {
 			return nil
 		}
 
@@ -301,14 +306,20 @@ func detectConversionCandidates(chartRoot string) ([]DetectedCandidate, error) {
 			var valuesUsages []ValuesUsage
 			if hasIncludeDirective(directive.Content) {
 				visited := make(map[string]bool)
-				valuesUsages = followIncludeChain(templatesDir, directive.Content, visited)
+				valuesUsages = followIncludeChain(templatesDir, directive.Content, directive.WithContext, visited)
 			} else {
-				valuesUsages = analyzeDirectiveContent(directive.Content)
+				valuesUsages = analyzeDirectiveContent(directive.Content, directive.WithContext)
 			}
 
 			for _, usage := range valuesUsages {
 				if !usage.IsListUse {
 					continue // Already using map pattern
+				}
+
+				// Skip "with" pattern itself - we only care about actual rendering (toYaml)
+				// The "with" just opens a scope; the "toYaml_dot" inside is what renders data
+				if usage.Pattern == "with" {
+					continue
 				}
 
 				if seen[usage.ValuesPath] {
@@ -317,15 +328,40 @@ func detectConversionCandidates(chartRoot string) ([]DetectedCandidate, error) {
 
 				// Determine full YAML path where this value is rendered
 				sectionName := getLastPathSegment(usage.ValuesPath)
-				fullYAMLPath := directive.YAMLPath
-				if fullYAMLPath != "" {
-					fullYAMLPath = fullYAMLPath + "." + sectionName
-				} else {
-					fullYAMLPath = sectionName
+				var fullYAMLPath string
+
+				switch usage.Pattern {
+				case "toYaml_dot":
+					// For "toYaml ." inside a "with" block, the directive's YAMLPath
+					// already points to the target K8s field (e.g., spec.template.spec.containers.volumeMounts)
+					fullYAMLPath = directive.YAMLPath
+				default:
+					// For direct "toYaml .Values.X", the directive's YAMLPath usually already
+					// includes the section name (e.g., "spec.groups" for a directive under "groups:")
+					// Only append sectionName if it's not already the last segment
+					if directive.YAMLPath != "" {
+						lastSegment := getLastPathSegment(directive.YAMLPath)
+						if lastSegment == sectionName {
+							// YAML path already ends with the section name
+							fullYAMLPath = directive.YAMLPath
+						} else {
+							// Need to append (e.g., inline directive on same line as key)
+							fullYAMLPath = directive.YAMLPath + "." + sectionName
+						}
+					} else {
+						fullYAMLPath = sectionName
+					}
 				}
 
 				// Check if this path points to a convertible field
-				fieldInfo := isConvertibleField(parsed.GoType, fullYAMLPath)
+				// Try built-in K8s types first, then CRD registry
+				var fieldInfo *FieldInfo
+				if parsed.GoType != nil {
+					fieldInfo = isConvertibleField(parsed.GoType, fullYAMLPath)
+				}
+				if fieldInfo == nil && hasCRDType {
+					fieldInfo = isConvertibleCRDField(parsed.APIVersion, parsed.Kind, fullYAMLPath)
+				}
 				if fieldInfo == nil {
 					continue
 				}
@@ -333,7 +369,12 @@ func detectConversionCandidates(chartRoot string) ([]DetectedCandidate, error) {
 				seen[usage.ValuesPath] = true
 
 				// Build element type name
-				elemTypeName := formatTypeName(fieldInfo.ElementType)
+				var elemTypeName string
+				if fieldInfo.ElementType != nil {
+					elemTypeName = formatTypeName(fieldInfo.ElementType)
+				} else {
+					elemTypeName = "map[string]interface{}" // CRD types don't have Go types
+				}
 
 				// Get relative template filename
 				templateFile := filepath.Base(path)

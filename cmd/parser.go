@@ -12,10 +12,11 @@ import (
 
 // TemplateDirective represents a Go template directive found in a K8s manifest
 type TemplateDirective struct {
-	YAMLPath   string // e.g., spec.template.spec.volumes
-	Content    string // The template content (e.g., "{{- toYaml .Values.volumes | nindent 8 }}")
-	LineNumber int
-	FilePath   string
+	YAMLPath    string // e.g., spec.template.spec.volumes
+	Content     string // The template content (e.g., "{{- toYaml .Values.volumes | nindent 8 }}")
+	LineNumber  int
+	FilePath    string
+	WithContext string // If inside a "with .Values.X" block, the Values path
 }
 
 // ParsedTemplate represents a parsed Helm template file
@@ -58,14 +59,11 @@ func parseTemplateFile(templatePath string) (*ParsedTemplate, error) {
 		return result, nil
 	}
 
-	// Resolve Go type
+	// Resolve Go type (may be nil for CRDs)
 	result.GoType = resolveKubeAPIType(result.APIVersion, result.Kind)
-	if result.GoType == nil {
-		// Unknown type (probably CRD) - can still be handled by user rules
-		return result, nil
-	}
 
 	// Extract template directives with their YAML paths
+	// This is needed for both built-in K8s types and CRDs
 	result.Directives = extractDirectives(lines, templatePath)
 
 	return result, nil
@@ -104,6 +102,12 @@ func extractAPIVersionAndKind(lines []string) (apiVersion, kind string) {
 	return
 }
 
+// withBlockContext tracks a "with .Values.X" block
+type withBlockContext struct {
+	valuesPath string // The .Values path (e.g., "prometheusOperator.extraVolumeMounts")
+	indent     int    // Indentation level where the with started
+}
+
 // extractDirectives finds template directives and their YAML path context
 func extractDirectives(lines []string, filePath string) []TemplateDirective {
 	var directives []TemplateDirective
@@ -111,10 +115,18 @@ func extractDirectives(lines []string, filePath string) []TemplateDirective {
 	// Track YAML path via indentation
 	var pathStack []pathLevel
 
+	// Track with block contexts for resolving "toYaml ." patterns
+	var withStack []withBlockContext
+
 	// Regex patterns
 	reYAMLKey := regexp.MustCompile(`^(\s*)([a-zA-Z_][a-zA-Z0-9_-]*):\s*(.*)`)
 	reTemplateDirective := regexp.MustCompile(`\{\{.*\}\}`)
 	reListItem := regexp.MustCompile(`^(\s*)-\s*`)
+
+	// Pattern to detect "with .Values.X"
+	reWithValues := regexp.MustCompile(`\{\{-?\s*with\s+\.Values\.([a-zA-Z0-9_.]+)\s*-?\}\}`)
+	// Pattern to detect "end" closing a block
+	reEnd := regexp.MustCompile(`\{\{-?\s*end\s*-?\}\}`)
 
 	for lineNum, line := range lines {
 		// Skip empty lines and comments
@@ -123,28 +135,51 @@ func extractDirectives(lines []string, filePath string) []TemplateDirective {
 			continue
 		}
 
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+
+		// Check for "with .Values.X" opening a new context
+		if m := reWithValues.FindStringSubmatch(line); m != nil {
+			withStack = append(withStack, withBlockContext{
+				valuesPath: m[1],
+				indent:     indent,
+			})
+		}
+
+		// Check for "end" that might close a with block
+		if reEnd.MatchString(line) && len(withStack) > 0 {
+			// Pop the most recent with block at or after this indent level
+			// Note: This is a simplification - real Go template parsing would need proper nesting
+			withStack = withStack[:len(withStack)-1]
+		}
+
 		// Check for YAML key
 		if m := reYAMLKey.FindStringSubmatch(line); m != nil {
-			indent := len(m[1])
+			keyIndent := len(m[1])
 			key := m[2]
 			value := m[3]
 
 			// Pop stack until we find parent level
-			for len(pathStack) > 0 && pathStack[len(pathStack)-1].indent >= indent {
+			for len(pathStack) > 0 && pathStack[len(pathStack)-1].indent >= keyIndent {
 				pathStack = pathStack[:len(pathStack)-1]
 			}
 
 			// Push current key
-			pathStack = append(pathStack, pathLevel{indent: indent, key: key})
+			pathStack = append(pathStack, pathLevel{indent: keyIndent, key: key})
 
 			// Check if value contains a template directive
 			if reTemplateDirective.MatchString(value) {
 				yamlPath := buildYAMLPath(pathStack)
+				// Capture current with context
+				var withContext string
+				if len(withStack) > 0 {
+					withContext = withStack[len(withStack)-1].valuesPath
+				}
 				directives = append(directives, TemplateDirective{
-					YAMLPath:   yamlPath,
-					Content:    strings.TrimSpace(value),
-					LineNumber: lineNum + 1,
-					FilePath:   filePath,
+					YAMLPath:    yamlPath,
+					Content:     strings.TrimSpace(value),
+					LineNumber:  lineNum + 1,
+					FilePath:    filePath,
+					WithContext: withContext,
 				})
 			}
 			continue
@@ -152,29 +187,37 @@ func extractDirectives(lines []string, filePath string) []TemplateDirective {
 
 		// Check for list item with template
 		if m := reListItem.FindStringSubmatch(line); m != nil {
-			indent := len(m[1])
+			listIndent := len(m[1])
 			// Adjust stack for list context
-			for len(pathStack) > 0 && pathStack[len(pathStack)-1].indent >= indent {
+			for len(pathStack) > 0 && pathStack[len(pathStack)-1].indent >= listIndent {
 				pathStack = pathStack[:len(pathStack)-1]
 			}
 		}
 
 		// Check for standalone template directive line
 		if reTemplateDirective.MatchString(line) && !reYAMLKey.MatchString(line) {
-			// Determine indent of this line
-			indent := len(line) - len(strings.TrimLeft(line, " \t"))
-
-			// Find the YAML path at this indentation level
-			for len(pathStack) > 0 && pathStack[len(pathStack)-1].indent >= indent {
-				pathStack = pathStack[:len(pathStack)-1]
+			// Build YAML path excluding items deeper than this directive's indentation.
+			// We don't permanently modify pathStack because template directives don't
+			// establish YAML structure - they just need to know their context.
+			// However, items at indent > this line's indent are not part of our context.
+			var contextStack []pathLevel
+			for _, level := range pathStack {
+				if level.indent <= indent {
+					contextStack = append(contextStack, level)
+				}
 			}
-
-			yamlPath := buildYAMLPath(pathStack)
+			yamlPath := buildYAMLPath(contextStack)
+			// Capture current with context
+			var withContext string
+			if len(withStack) > 0 {
+				withContext = withStack[len(withStack)-1].valuesPath
+			}
 			directives = append(directives, TemplateDirective{
-				YAMLPath:   yamlPath,
-				Content:    trimmed,
-				LineNumber: lineNum + 1,
-				FilePath:   filePath,
+				YAMLPath:    yamlPath,
+				Content:     trimmed,
+				LineNumber:  lineNum + 1,
+				FilePath:    filePath,
+				WithContext: withContext,
 			})
 		}
 	}
@@ -205,7 +248,8 @@ type ValuesUsage struct {
 }
 
 // analyzeDirectiveContent extracts .Values usage from a template directive
-func analyzeDirectiveContent(content string) []ValuesUsage {
+// withContext is provided when the directive is inside a "with .Values.X" block
+func analyzeDirectiveContent(content string, withContext string) []ValuesUsage {
 	var usages []ValuesUsage
 
 	// Pattern: toYaml .Values.X
@@ -216,6 +260,19 @@ func analyzeDirectiveContent(content string) []ValuesUsage {
 			Pattern:    "toYaml",
 			IsListUse:  true,
 		})
+	}
+
+	// Pattern: toYaml . (dot context - uses the enclosing "with" block's path)
+	// Only match if there's a withContext and the content uses just "."
+	if withContext != "" {
+		reToYamlDot := regexp.MustCompile(`toYaml\s+\.(\s*[|}\s])`)
+		if reToYamlDot.MatchString(content) {
+			usages = append(usages, ValuesUsage{
+				ValuesPath: withContext,
+				Pattern:    "toYaml_dot",
+				IsListUse:  true,
+			})
+		}
 	}
 
 	// Pattern: with .Values.X
@@ -340,11 +397,12 @@ func extractDefinedTemplate(fileContent, templateName string) string {
 }
 
 // followIncludeChain recursively follows include directives to find .Values usage
-func followIncludeChain(templatesDir, content string, visited map[string]bool) []ValuesUsage {
+// withContext is passed through when the include is inside a "with .Values.X" block
+func followIncludeChain(templatesDir, content, withContext string, visited map[string]bool) []ValuesUsage {
 	var allUsages []ValuesUsage
 
 	// First check for direct .Values usage
-	usages := analyzeDirectiveContent(content)
+	usages := analyzeDirectiveContent(content, withContext)
 	allUsages = append(allUsages, usages...)
 
 	// Check for includes and follow them
@@ -364,8 +422,8 @@ func followIncludeChain(templatesDir, content string, visited map[string]bool) [
 			continue
 		}
 
-		// Recursively follow
-		nestedUsages := followIncludeChain(templatesDir, includedContent, visited)
+		// Recursively follow (pass through withContext)
+		nestedUsages := followIncludeChain(templatesDir, includedContent, withContext, visited)
 		allUsages = append(allUsages, nestedUsages...)
 	}
 
