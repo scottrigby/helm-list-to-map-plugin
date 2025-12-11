@@ -2,7 +2,6 @@
 package main
 
 import (
-	"bytes"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -13,8 +12,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
-
-type Values = map[string]interface{}
 
 // Rule represents a user-defined conversion rule for CRDs and custom resources
 type Rule struct {
@@ -304,53 +301,116 @@ Flags:
 	}
 
 	valuesPath := filepath.Join(root, "values.yaml")
-	values, raw, err := loadValues(valuesPath)
+	doc, raw, err := loadValuesNode(valuesPath)
 	if err != nil {
 		fatal(err)
 	}
-	var report strings.Builder
-	changed := migrateValues(values, nil, &report, false, candidateMap)
-	if changed {
-		out, err := marshalYAML(values)
-		if err != nil {
-			fatal(err)
-		}
+
+	// Use line-based editing to preserve original formatting
+	var edits []ArrayEdit
+	findArrayEdits(doc, nil, candidateMap, &edits)
+
+	// Track all backup files created
+	var backupFiles []string
+
+	if len(edits) > 0 {
+		out := applyLineEdits(raw, edits)
+
 		if dryRun {
 			fmt.Println("=== values.yaml (updated preview) ===")
 			fmt.Println(string(out))
 		} else {
+			backupPath := valuesPath + backupExt
 			if err := backupFile(valuesPath, backupExt, raw); err != nil {
 				fatal(err)
 			}
+			backupFiles = append(backupFiles, backupPath)
 			if err := os.WriteFile(valuesPath, out, 0644); err != nil {
 				fatal(err)
 			}
 		}
-		fmt.Print(report.String())
+
+		// Report changes with detailed info
+		fmt.Println("\nConverted values.yaml fields:")
+		for _, edit := range edits {
+			// Build JSONPath for display
+			jsonPath := edit.Candidate.YAMLPath
+			if edit.Candidate.ResourceKind != "" {
+				jsonPath = edit.Candidate.ResourceKind + "." + jsonPath
+			}
+
+			// Count items
+			itemCount := 0
+			walkForCount(doc, edit.Candidate.ValuesPath, &itemCount)
+
+			// Display detailed info
+			fmt.Printf("  %s:\n", edit.Candidate.ValuesPath)
+			fmt.Printf("    JSONPath: %s\n", jsonPath)
+			fmt.Printf("    Key:      %s\n", edit.Candidate.MergeKey)
+			if edit.Candidate.ElementType != "" {
+				fmt.Printf("    Type:     %s\n", edit.Candidate.ElementType)
+			}
+			if edit.Candidate.TemplateFile != "" {
+				fmt.Printf("    Used in:  templates/%s\n", edit.Candidate.TemplateFile)
+			}
+			if itemCount == 0 {
+				fmt.Printf("    Items:    0 (empty array)\n")
+			} else {
+				fmt.Printf("    Items:    %d\n", itemCount)
+			}
+
+			transformedPaths = append(transformedPaths, PathInfo{
+				DotPath:     edit.Candidate.ValuesPath,
+				MergeKey:    edit.Candidate.MergeKey,
+				SectionName: edit.Candidate.SectionName,
+			})
+		}
 	} else {
 		fmt.Println("No changes needed in values.yaml.")
 	}
 
 	var tchanges []string
+	var helperCreated bool
 	if !dryRun {
 		var err error
-		tchanges, err = rewriteTemplatesNew(root, transformedPaths)
+		tchanges, backupFiles, err = rewriteTemplatesWithBackups(root, transformedPaths, backupExt, backupFiles)
 		if err != nil {
 			fatal(err)
 		}
-		for _, ch := range tchanges {
-			fmt.Printf("- Updated template: %s\n", ch)
+
+		if len(tchanges) > 0 {
+			fmt.Println("\nUpdated templates:")
+			for _, ch := range tchanges {
+				fmt.Printf("  %s\n", ch)
+			}
 		}
 
-		ensureHelpers(root)
+		helperCreated = ensureHelpersWithReport(root)
+		if helperCreated {
+			fmt.Println("\nCreated helper template:")
+			fmt.Printf("  templates/_listmap.tpl\n")
+		}
 	} else if len(transformedPaths) > 0 {
-		fmt.Println("Template changes would be applied (use without --dry-run to apply):")
+		fmt.Println("\nTemplate changes (dry-run, not applied):")
 		for _, p := range transformedPaths {
-			fmt.Printf("- Would update templates using %s\n", p.DotPath)
+			fmt.Printf("  Would update templates using .Values.%s\n", p.DotPath)
+		}
+		fmt.Println("  Would create templates/_listmap.tpl (if not exists)")
+	}
+
+	// Report backup files
+	if !dryRun && len(backupFiles) > 0 {
+		fmt.Println("\nBackup files created:")
+		for _, bf := range backupFiles {
+			relPath, _ := filepath.Rel(root, bf)
+			if relPath == "" {
+				relPath = bf
+			}
+			fmt.Printf("  %s\n", relPath)
 		}
 	}
 
-	if !changed && len(tchanges) == 0 && !dryRun {
+	if len(edits) == 0 && len(tchanges) == 0 && !dryRun {
 		fmt.Println("Nothing to convert.")
 	}
 }
@@ -458,30 +518,20 @@ func findChartRoot(start string) (string, error) {
 		}
 		p = np
 	}
-	return "", fmt.Errorf("Chart.yaml not found starting from %s", start)
+	return "", fmt.Errorf("chart.yaml not found starting from %s", start)
 }
 
-func loadValues(path string) (Values, []byte, error) {
+// loadValuesNode loads values.yaml as a yaml.Node tree to preserve comments and formatting
+func loadValuesNode(path string) (*yaml.Node, []byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil, err
 	}
-	var v Values
-	if err := yaml.Unmarshal(data, &v); err != nil {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil, nil, err
 	}
-	return v, data, nil
-}
-
-func marshalYAML(v interface{}) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	enc.SetIndent(2)
-	if err := enc.Encode(v); err != nil {
-		return nil, err
-	}
-	_ = enc.Close()
-	return buf.Bytes(), nil
+	return &doc, data, nil
 }
 
 func backupFile(path, ext string, original []byte) error {
@@ -490,6 +540,468 @@ func backupFile(path, ext string, original []byte) error {
 
 func dotPath(path []string) string {
 	return strings.Join(path, ".")
+}
+
+// getMaxLine returns the maximum line number within a yaml.Node tree
+func getMaxLine(n *yaml.Node) int {
+	max := n.Line
+	for _, c := range n.Content {
+		if c.Line > max {
+			max = c.Line
+		}
+		if childMax := getMaxLine(c); childMax > max {
+			max = childMax
+		}
+	}
+	return max
+}
+
+// ArrayEdit represents a single array-to-map conversion with line info
+type ArrayEdit struct {
+	KeyLine        int    // Line number of the key (e.g., "volumes:")
+	ValueStartLine int    // Line where the array value starts
+	ValueEndLine   int    // Line where the array value ends
+	KeyColumn      int    // Column of the key (for indentation)
+	Replacement    string // The new map-format YAML
+	Candidate      DetectedCandidate
+}
+
+// findArrayEdits walks the YAML tree and finds all arrays that need conversion
+func findArrayEdits(node *yaml.Node, path []string, candidates map[string]DetectedCandidate, edits *[]ArrayEdit) {
+	if node == nil {
+		return
+	}
+
+	switch node.Kind {
+	case yaml.DocumentNode:
+		for _, child := range node.Content {
+			findArrayEdits(child, path, candidates, edits)
+		}
+
+	case yaml.MappingNode:
+		for i := 0; i < len(node.Content); i += 2 {
+			keyNode := node.Content[i]
+			valueNode := node.Content[i+1]
+
+			key := keyNode.Value
+			p := append(path, key)
+			dp := dotPath(p)
+
+			if candidate, isDetected := candidates[dp]; isDetected {
+				if valueNode.Kind == yaml.SequenceNode {
+					replacement := generateMapReplacement(valueNode, candidate, keyNode.Column)
+					if replacement != "" {
+						*edits = append(*edits, ArrayEdit{
+							KeyLine:        keyNode.Line,
+							ValueStartLine: valueNode.Line,
+							ValueEndLine:   getMaxLine(valueNode),
+							KeyColumn:      keyNode.Column,
+							Replacement:    replacement,
+							Candidate:      candidate,
+						})
+						continue
+					}
+				}
+			}
+
+			findArrayEdits(valueNode, p, candidates, edits)
+		}
+
+	case yaml.SequenceNode:
+		for i, item := range node.Content {
+			findArrayEdits(item, append(path, fmt.Sprintf("[%d]", i)), candidates, edits)
+		}
+	}
+}
+
+// generateMapReplacement generates the map-format YAML for an array
+func generateMapReplacement(seqNode *yaml.Node, candidate DetectedCandidate, baseIndent int) string {
+	mergeKey := candidate.MergeKey
+	indent := strings.Repeat(" ", baseIndent)
+
+	// Handle empty sequence: [] -> {}
+	if len(seqNode.Content) == 0 {
+		return "{}"
+	}
+
+	var lines []string
+	for _, item := range seqNode.Content {
+		if item.Kind != yaml.MappingNode {
+			return "" // Can't convert non-mapping items
+		}
+
+		// Find the merge key value
+		var keyValue string
+		var keyIndex = -1
+		for j := 0; j < len(item.Content); j += 2 {
+			if item.Content[j].Value == mergeKey {
+				keyValue = item.Content[j+1].Value
+				keyIndex = j
+				break
+			}
+		}
+
+		if keyValue == "" {
+			return "" // Merge key not found
+		}
+
+		// Start with the key
+		lines = append(lines, fmt.Sprintf("%s%s:", indent, keyValue))
+
+		// Add remaining fields
+		for j := 0; j < len(item.Content); j += 2 {
+			if j == keyIndex {
+				continue // Skip the merge key
+			}
+			fieldKey := item.Content[j]
+			fieldVal := item.Content[j+1]
+
+			// Generate the field YAML
+			fieldYAML := generateFieldYAML(fieldKey, fieldVal, baseIndent+2)
+			lines = append(lines, fieldYAML)
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// generateFieldYAML generates YAML for a single field with proper indentation
+func generateFieldYAML(keyNode, valueNode *yaml.Node, indent int) string {
+	indentStr := strings.Repeat(" ", indent)
+
+	// Simple scalar value
+	if valueNode.Kind == yaml.ScalarNode {
+		val := valueNode.Value
+		// Quote strings that need it
+		if valueNode.Tag == "!!str" && needsQuoting(val) {
+			val = fmt.Sprintf("%q", val)
+		}
+		return fmt.Sprintf("%s%s: %s", indentStr, keyNode.Value, val)
+	}
+
+	// Mapping value - needs nested output
+	if valueNode.Kind == yaml.MappingNode {
+		var lines []string
+		lines = append(lines, fmt.Sprintf("%s%s:", indentStr, keyNode.Value))
+		for j := 0; j < len(valueNode.Content); j += 2 {
+			subKey := valueNode.Content[j]
+			subVal := valueNode.Content[j+1]
+			lines = append(lines, generateFieldYAML(subKey, subVal, indent+2))
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	// Sequence value
+	if valueNode.Kind == yaml.SequenceNode {
+		var lines []string
+		lines = append(lines, fmt.Sprintf("%s%s:", indentStr, keyNode.Value))
+		for _, item := range valueNode.Content {
+			if item.Kind == yaml.ScalarNode {
+				lines = append(lines, fmt.Sprintf("%s  - %s", indentStr, item.Value))
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	return ""
+}
+
+// needsQuoting returns true if a string value needs to be quoted
+func needsQuoting(s string) bool {
+	if s == "" {
+		return true
+	}
+	// Check for special characters that need quoting
+	for _, c := range s {
+		if c == ':' || c == '#' || c == '[' || c == ']' || c == '{' || c == '}' || c == ',' || c == '&' || c == '*' || c == '!' || c == '|' || c == '>' || c == '\'' || c == '"' || c == '%' || c == '@' || c == '`' {
+			return true
+		}
+	}
+	return false
+}
+
+// walkForCount finds a sequence node by path and returns its item count
+func walkForCount(node *yaml.Node, valuesPath string, count *int) {
+	if node == nil {
+		return
+	}
+
+	switch node.Kind {
+	case yaml.DocumentNode:
+		for _, child := range node.Content {
+			walkForCount(child, valuesPath, count)
+		}
+	case yaml.MappingNode:
+		for i := 0; i < len(node.Content); i += 2 {
+			keyNode := node.Content[i]
+			valueNode := node.Content[i+1]
+			if keyNode.Value == valuesPath {
+				if valueNode.Kind == yaml.SequenceNode {
+					*count = len(valueNode.Content)
+				}
+				return
+			}
+			walkForCount(valueNode, valuesPath, count)
+		}
+	}
+}
+
+// applyLineEdits applies line-based edits to the original file content
+// This approach transforms array items in-place, preserving original formatting
+func applyLineEdits(original []byte, edits []ArrayEdit) []byte {
+	if len(edits) == 0 {
+		return original
+	}
+
+	lines := strings.Split(string(original), "\n")
+
+	// Sort edits by line number in reverse order (so we edit from bottom to top)
+	// This way line numbers don't shift as we make edits
+	sortedEdits := make([]ArrayEdit, len(edits))
+	copy(sortedEdits, edits)
+	for i := 0; i < len(sortedEdits)-1; i++ {
+		for j := i + 1; j < len(sortedEdits); j++ {
+			if sortedEdits[i].KeyLine < sortedEdits[j].KeyLine {
+				sortedEdits[i], sortedEdits[j] = sortedEdits[j], sortedEdits[i]
+			}
+		}
+	}
+
+	for _, edit := range sortedEdits {
+		keyLineIdx := edit.KeyLine - 1
+		valueEndIdx := edit.ValueEndLine - 1
+
+		if keyLineIdx < 0 || valueEndIdx >= len(lines) {
+			continue
+		}
+
+		keyLine := lines[keyLineIdx]
+		colonIdx := strings.Index(keyLine, ":")
+		if colonIdx == -1 {
+			continue
+		}
+
+		// Build the comment to insert (use key's column for proper indentation)
+		// keyColumn is 1-based in yaml.Node, so subtract 1 for 0-based string index
+		commentIndent := ""
+		if edit.KeyColumn > 1 {
+			commentIndent = strings.Repeat(" ", edit.KeyColumn-1)
+		}
+		// Build JSONPath-style comment: Kind.spec.path (key: mergeKey)
+		jsonPath := edit.Candidate.YAMLPath
+		if edit.Candidate.ResourceKind != "" {
+			jsonPath = edit.Candidate.ResourceKind + "." + jsonPath
+		}
+		comment := fmt.Sprintf("%s# %s (key: %s)",
+			commentIndent,
+			jsonPath,
+			edit.Candidate.MergeKey)
+
+		afterColon := strings.TrimSpace(keyLine[colonIdx+1:])
+
+		if afterColon == "[]" || afterColon == "{}" {
+			// Inline empty array/map - add comment and change [] to {}
+			// Also remove any commented-out array examples that follow
+			newKeyLine := keyLine[:colonIdx+1] + " {}"
+
+			// Find where commented-out examples end (lines starting with #, indented more than key)
+			// These are stale array-syntax examples like "# - name: foo"
+			endOfCommentedExamples := keyLineIdx + 1
+			keyIndent := len(keyLine) - len(strings.TrimLeft(keyLine, " "))
+			lastCommentLine := keyLineIdx // Track the last actual comment line
+
+			for i := keyLineIdx + 1; i < len(lines); i++ {
+				line := lines[i]
+				trimmed := strings.TrimSpace(line)
+
+				// Empty line - don't include it yet, wait to see if more comments follow
+				if trimmed == "" {
+					continue
+				}
+
+				// Check if this is a commented-out array item (indented comment)
+				lineIndent := len(line) - len(strings.TrimLeft(line, " "))
+				if strings.HasPrefix(trimmed, "#") && lineIndent > keyIndent {
+					// This is an indented comment - likely a commented-out example
+					lastCommentLine = i
+					endOfCommentedExamples = i + 1
+					continue
+				}
+
+				// Not a commented example, stop here
+				break
+			}
+
+			// If we found commented examples, also skip any blank lines immediately after them
+			// but preserve blank line separators before the next section
+			if lastCommentLine > keyLineIdx {
+				// Check if there's a blank line right after the last comment
+				for i := lastCommentLine + 1; i < len(lines); i++ {
+					if strings.TrimSpace(lines[i]) == "" {
+						endOfCommentedExamples = i + 1
+					} else {
+						break
+					}
+				}
+			}
+
+			newLines := make([]string, 0, len(lines)+1)
+			newLines = append(newLines, lines[:keyLineIdx]...)
+			newLines = append(newLines, comment)
+			newLines = append(newLines, newKeyLine)
+			// Skip the commented-out examples, but add back a blank line if there was content removed
+			if endOfCommentedExamples > keyLineIdx+1 && endOfCommentedExamples < len(lines) {
+				// Add a blank line to preserve section separation
+				newLines = append(newLines, "")
+			}
+			if endOfCommentedExamples < len(lines) {
+				newLines = append(newLines, lines[endOfCommentedExamples:]...)
+			}
+			lines = newLines
+		} else {
+			// Multi-line array - transform each "- key: value" to "key:\n  otherfields"
+			// Extract the array lines
+			arrayLines := lines[keyLineIdx+1 : valueEndIdx+1]
+			transformedLines := transformArrayToMap(arrayLines, edit.Candidate.MergeKey)
+
+			// Build new content
+			newLines := make([]string, 0, len(lines))
+			newLines = append(newLines, lines[:keyLineIdx]...)
+			newLines = append(newLines, comment)
+			newLines = append(newLines, keyLine) // Keep original key line (e.g., "env:")
+			newLines = append(newLines, transformedLines...)
+			if valueEndIdx+1 < len(lines) {
+				newLines = append(newLines, lines[valueEndIdx+1:]...)
+			}
+			lines = newLines
+		}
+	}
+
+	return []byte(strings.Join(lines, "\n"))
+}
+
+// transformArrayToMap transforms YAML array lines to map format
+// Input:  ["  - name: foo", "    value: bar", "  - name: baz", "    value: qux"]
+// Output: ["  foo:", "    value: bar", "  baz:", "    value: qux"]
+func transformArrayToMap(arrayLines []string, mergeKey string) []string {
+	var result []string
+	var currentItemLines []string
+	var baseIndent string
+	inItem := false
+
+	for _, line := range arrayLines {
+		trimmed := strings.TrimLeft(line, " ")
+
+		// Check if this is a new array item (starts with "- ")
+		if strings.HasPrefix(trimmed, "- ") {
+			// Process previous item if any
+			if inItem && len(currentItemLines) > 0 {
+				transformed := transformSingleItem(currentItemLines, mergeKey, baseIndent)
+				result = append(result, transformed...)
+			}
+
+			// Start new item
+			currentItemLines = []string{line}
+			baseIndent = strings.Repeat(" ", len(line)-len(trimmed))
+			inItem = true
+		} else if inItem {
+			// Continuation of current item
+			currentItemLines = append(currentItemLines, line)
+		}
+	}
+
+	// Process last item
+	if inItem && len(currentItemLines) > 0 {
+		transformed := transformSingleItem(currentItemLines, mergeKey, baseIndent)
+		result = append(result, transformed...)
+	}
+
+	return result
+}
+
+// transformSingleItem transforms a single array item from list to map format
+func transformSingleItem(itemLines []string, mergeKey, baseIndent string) []string {
+	if len(itemLines) == 0 {
+		return nil
+	}
+
+	var result []string
+	var mergeKeyValue string
+	var mergeKeyLineComment string
+
+	// Parse first line to extract merge key if present
+	firstLine := itemLines[0]
+	trimmed := strings.TrimLeft(firstLine, " ")
+	if strings.HasPrefix(trimmed, "- ") {
+		afterDash := strings.TrimPrefix(trimmed, "- ")
+
+		// Check if merge key is on this line (e.g., "- name: foo")
+		if strings.HasPrefix(afterDash, mergeKey+":") {
+			// Extract the value after "name: "
+			valueStart := len(mergeKey) + 2 // +2 for ": "
+			rest := afterDash[valueStart:]
+
+			// Handle line comments
+			if commentIdx := strings.Index(rest, " #"); commentIdx >= 0 {
+				mergeKeyValue = strings.TrimSpace(rest[:commentIdx])
+				mergeKeyLineComment = rest[commentIdx:]
+			} else {
+				mergeKeyValue = strings.TrimSpace(rest)
+			}
+
+			// Start result with the map key
+			result = append(result, fmt.Sprintf("%s%s:%s", baseIndent, mergeKeyValue, mergeKeyLineComment))
+
+			// Add remaining fields from first line (if any after the merge key on same line)
+			// This handles compact format like "- name: foo value: bar"
+			// For now, assume standard format where other fields are on subsequent lines
+		} else {
+			// First line doesn't have merge key, look for it in subsequent lines
+			// Meanwhile, add non-merge-key content from first line
+			// Strip the "- " prefix and adjust indentation
+			afterDash = strings.TrimSpace(afterDash)
+			if afterDash != "" {
+				parts := strings.SplitN(afterDash, ":", 2)
+				if len(parts) == 2 {
+					key := parts[0]
+					val := strings.TrimSpace(parts[1])
+					result = append(result, fmt.Sprintf("%s  %s: %s", baseIndent, key, val))
+				}
+			}
+		}
+	}
+
+	// Process remaining lines
+	for i := 1; i < len(itemLines); i++ {
+		line := itemLines[i]
+		trimmed := strings.TrimLeft(line, " ")
+
+		// Check if this line contains the merge key
+		if strings.HasPrefix(trimmed, mergeKey+":") && mergeKeyValue == "" {
+			// Extract merge key value
+			valueStart := len(mergeKey) + 2
+			rest := trimmed[valueStart:]
+
+			if commentIdx := strings.Index(rest, " #"); commentIdx >= 0 {
+				mergeKeyValue = strings.TrimSpace(rest[:commentIdx])
+				mergeKeyLineComment = rest[commentIdx:]
+			} else {
+				mergeKeyValue = strings.TrimSpace(rest)
+			}
+
+			// Insert the map key at the beginning
+			keyLine := fmt.Sprintf("%s%s:%s", baseIndent, mergeKeyValue, mergeKeyLineComment)
+			result = append([]string{keyLine}, result...)
+		} else {
+			// Regular field - keep it but adjust indentation
+			// Original: 4 spaces + field (under "- name:")
+			// New: 2 spaces + field (under "keyValue:")
+			// The relative indentation stays the same
+			result = append(result, line)
+		}
+	}
+
+	return result
 }
 
 // matchRule checks if a path matches any user-defined rule (for CRDs)
@@ -529,118 +1041,10 @@ func matchGlob(pattern, text string) bool {
 	return true
 }
 
-func copyWithoutKey(m map[string]interface{}, key string) map[string]interface{} {
-	out := make(map[string]interface{}, len(m))
-	for k, v := range m {
-		if k == key {
-			continue
-		}
-		out[k] = v
-	}
-	return out
-}
-
-// migrateValues migrates arrays to maps based on detected candidates from K8s API introspection
-func migrateValues(node interface{}, path []string, report *strings.Builder, detectOnly bool, candidates map[string]DetectedCandidate) bool {
-	changed := false
-	switch t := node.(type) {
-	case map[string]interface{}:
-		for k, v := range t {
-			p := append(path, k)
-			dp := dotPath(p)
-
-			// Check if this path should be converted based on detection
-			if candidate, isDetected := candidates[dp]; isDetected {
-				// Handle empty array case: [] -> {}
-				if arr, ok := v.([]interface{}); ok && len(arr) == 0 {
-					if detectOnly {
-						continue
-					}
-					// Convert empty array to empty map
-					t[k] = map[string]interface{}{}
-					changed = true
-					report.WriteString(fmt.Sprintf("- Migrated %s (key=%s) [empty array]\n", candidate.ValuesPath, candidate.MergeKey))
-					transformedPaths = append(transformedPaths, PathInfo{
-						DotPath:     candidate.ValuesPath,
-						MergeKey:    candidate.MergeKey,
-						SectionName: candidate.SectionName,
-					})
-					continue
-				}
-				// Handle populated array
-				if arr, ok := v.([]interface{}); ok && len(arr) > 0 {
-					out, did := convertArrayWithCandidate(arr, candidate)
-					if did {
-						if detectOnly {
-							report.WriteString(fmt.Sprintf("· %s → key=%s\n", candidate.ValuesPath, candidate.MergeKey))
-						} else {
-							t[k] = out
-							changed = true
-							report.WriteString(fmt.Sprintf("- Migrated %s (key=%s)\n", candidate.ValuesPath, candidate.MergeKey))
-							transformedPaths = append(transformedPaths, PathInfo{
-								DotPath:     candidate.ValuesPath,
-								MergeKey:    candidate.MergeKey,
-								SectionName: candidate.SectionName,
-							})
-						}
-						continue
-					}
-				}
-			}
-
-			if v == nil {
-				continue
-			}
-			// Recurse into nested structures
-			if _, ok := v.([]interface{}); ok {
-				if migrateValues(v, p, report, detectOnly, candidates) {
-					changed = true
-				}
-				continue
-			}
-			if migrateValues(v, p, report, detectOnly, candidates) {
-				changed = true
-			}
-		}
-	case []interface{}:
-		for i := range t {
-			if migrateValues(t[i], append(path, fmt.Sprintf("[%d]", i)), report, detectOnly, candidates) {
-				changed = true
-			}
-		}
-	}
-	return changed
-}
-
-// convertArrayWithCandidate converts an array to a map using the candidate's merge key
-func convertArrayWithCandidate(arr []interface{}, candidate DetectedCandidate) (map[string]interface{}, bool) {
-	out := map[string]interface{}{}
-	key := candidate.MergeKey
-
-	for _, it := range arr {
-		m, ok := it.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		nameAny, has := m[key]
-		nameStr, _ := nameAny.(string)
-		if !has || strings.TrimSpace(nameStr) == "" {
-			continue
-		}
-		entry := copyWithoutKey(m, key)
-		out[nameStr] = entry
-	}
-
-	if len(out) == 0 {
-		return nil, false
-	}
-	return out, true
-}
-
-// rewriteTemplatesNew rewrites templates using the new PathInfo structure
-// Uses a single generic helper that takes key and section as parameters
-func rewriteTemplatesNew(chartPath string, paths []PathInfo) ([]string, error) {
+// rewriteTemplatesWithBackups rewrites templates and tracks backup files
+func rewriteTemplatesWithBackups(chartPath string, paths []PathInfo, backupExtension string, existingBackups []string) ([]string, []string, error) {
 	var changed []string
+	backups := existingBackups
 	tdir := filepath.Join(chartPath, "templates")
 	err := filepath.WalkDir(tdir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -662,9 +1066,11 @@ func rewriteTemplatesNew(chartPath string, paths []PathInfo) ([]string, error) {
 		}
 
 		if newContent != orig {
-			if err := backupFile(path, backupExt, data); err != nil {
+			backupPath := path + backupExtension
+			if err := backupFile(path, backupExtension, data); err != nil {
 				return err
 			}
+			backups = append(backups, backupPath)
 			if err := os.WriteFile(path, []byte(newContent), 0644); err != nil {
 				return err
 			}
@@ -672,7 +1078,7 @@ func rewriteTemplatesNew(chartPath string, paths []PathInfo) ([]string, error) {
 		}
 		return nil
 	})
-	return changed, err
+	return changed, backups, err
 }
 
 // replaceListBlocks replaces list rendering patterns with the generic helper
@@ -720,12 +1126,14 @@ func rel(root, p string) string {
 	return p
 }
 
-func ensureHelpers(root string) {
+// ensureHelpersWithReport creates helper template and returns true if created
+func ensureHelpersWithReport(root string) bool {
 	path := filepath.Join(root, "templates", "_listmap.tpl")
 	if _, err := os.Stat(path); err == nil {
-		return
+		return false // Already exists
 	}
-	_ = os.WriteFile(path, []byte(strings.TrimSpace(listMapHelper())+"\n"), 0644)
+	err := os.WriteFile(path, []byte(strings.TrimSpace(listMapHelper())+"\n"), 0644)
+	return err == nil
 }
 
 // listMapHelper returns a single generic helper template that works for any list type

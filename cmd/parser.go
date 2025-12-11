@@ -261,15 +261,6 @@ func analyzeDirectiveContent(content string) []ValuesUsage {
 	return usages
 }
 
-// extractIncludeName extracts the template name from an include directive
-func extractIncludeName(content string) string {
-	re := regexp.MustCompile(`include\s+"([^"]+)"`)
-	if m := re.FindStringSubmatch(content); m != nil {
-		return m[1]
-	}
-	return ""
-}
-
 // hasIncludeDirective checks if content contains an include directive
 func hasIncludeDirective(content string) bool {
 	return strings.Contains(content, "include ")

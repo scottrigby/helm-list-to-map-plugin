@@ -49,7 +49,7 @@ func init() {
 		{"v1", "PersistentVolumeClaim", corev1.PersistentVolumeClaim{}},
 		{"v1", "Namespace", corev1.Namespace{}},
 		{"v1", "Node", corev1.Node{}},
-		{"v1", "Endpoints", corev1.Endpoints{}},
+		{"v1", "Endpoints", corev1.Endpoints{}}, //nolint:staticcheck // Deprecated but still widely used
 		{"v1", "LimitRange", corev1.LimitRange{}},
 		{"v1", "ResourceQuota", corev1.ResourceQuota{}},
 		{"v1", "ReplicationController", corev1.ReplicationController{}},
@@ -152,9 +152,7 @@ func navigateFieldSchema(rootType reflect.Type, yamlPath string) (*FieldInfo, er
 		}
 
 		// Handle slice types - if we see [], we need to get the element type
-		if strings.HasSuffix(part, "[]") {
-			part = strings.TrimSuffix(part, "[]")
-		}
+		part = strings.TrimSuffix(part, "[]")
 
 		if currentType.Kind() != reflect.Struct {
 			return nil, fmt.Errorf("expected struct at %s, got %s", strings.Join(parts[:i], "."), currentType.Kind())
@@ -262,11 +260,13 @@ func isConvertibleField(rootType reflect.Type, yamlPath string) *FieldInfo {
 
 // DetectedCandidate represents a field detected for conversion
 type DetectedCandidate struct {
-	ValuesPath  string // Path in values.yaml (e.g., "volumes")
-	YAMLPath    string // Path in K8s resource (e.g., "spec.template.spec.volumes")
-	MergeKey    string // The patchMergeKey field (e.g., "name", "mountPath")
-	ElementType string // Go type name (e.g., "corev1.Volume")
-	SectionName string // The YAML section name (e.g., "volumes")
+	ValuesPath   string // Path in values.yaml (e.g., "volumes")
+	YAMLPath     string // Path in K8s resource (e.g., "spec.template.spec.volumes")
+	MergeKey     string // The patchMergeKey field (e.g., "name", "mountPath")
+	ElementType  string // Go type name (e.g., "corev1.Volume")
+	SectionName  string // The YAML section name (e.g., "volumes")
+	ResourceKind string // K8s resource kind (e.g., "Deployment", "StatefulSet")
+	TemplateFile string // Template file where this was detected (e.g., "deployment.yaml")
 }
 
 // detectConversionCandidates scans templates for convertible fields using K8s API introspection
@@ -335,12 +335,17 @@ func detectConversionCandidates(chartRoot string) ([]DetectedCandidate, error) {
 				// Build element type name
 				elemTypeName := formatTypeName(fieldInfo.ElementType)
 
+				// Get relative template filename
+				templateFile := filepath.Base(path)
+
 				candidates = append(candidates, DetectedCandidate{
-					ValuesPath:  usage.ValuesPath,
-					YAMLPath:    fullYAMLPath,
-					MergeKey:    fieldInfo.MergeKey,
-					ElementType: elemTypeName,
-					SectionName: sectionName,
+					ValuesPath:   usage.ValuesPath,
+					YAMLPath:     fullYAMLPath,
+					MergeKey:     fieldInfo.MergeKey,
+					ElementType:  elemTypeName,
+					SectionName:  sectionName,
+					ResourceKind: parsed.Kind,
+					TemplateFile: templateFile,
 				})
 			}
 		}
