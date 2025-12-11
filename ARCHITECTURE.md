@@ -2,32 +2,16 @@
 
 This document explains the design decisions behind the list-to-map Helm plugin.
 
-## Core Problem
+For the problem statement, solution overview, installation, and usage, see [README.md](README.md).
 
-Helm charts use YAML arrays for Kubernetes list fields (env vars, volumes, ports, etc.). Arrays are problematic for value overrides:
+## Overview
 
-- Overriding a single item requires knowing its array index, which is fragile and changes when items are reordered
-- Targeting an item by index (e.g., `--set env[1].value=foo`) breaks when the array order changes
-- Overriding by recreating the entire array loses other default values
-- Duplicate keys in arrays cause undefined Kubernetes behavior
+The plugin uses Kubernetes API introspection to automatically detect convertible fields:
 
-## Solution: Map-Based Values
-
-Convert arrays with unique keys into maps, where the unique key becomes the map key:
-
-```yaml
-# Before (array)
-env:
-  - name: DB_HOST
-    value: localhost
-
-# After (map)
-env:
-  DB_HOST:
-    value: localhost
-```
-
-This enables targeted overrides: `--set env.DB_HOST.value=production-host`
+1. **Parses templates** to find `apiVersion` and `kind` of K8s resources being constructed
+2. **Maps to K8s Go types** (e.g., `apps/v1` + `Deployment` → `appsv1.Deployment`)
+3. **Reads [`patchMergeKey`](#the-patchmergekey-discovery) struct tags** from K8s API types to determine the unique key for each list field
+4. **Converts values and templates** using a [single generic helper](#single-generic-helper)
 
 ## Why K8s API Introspection?
 

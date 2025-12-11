@@ -1,0 +1,37 @@
+name: Check README Usage
+
+on:
+  pull_request:
+    paths:
+      - "cmd/**"
+      - "README.md"
+      - "scripts/update-readme-usage.sh"
+
+jobs:
+  check-readme:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Build plugin
+        run: make build
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Install plugin
+        run: helm plugin install .
+
+      - name: Update README usage
+        run: ./scripts/update-readme-usage.sh
+
+      - name: Check for changes
+        run: |
+          if ! git diff --exit-code README.md; then
+            echo "::error::README.md usage section is out of date. Run ./scripts/update-readme-usage.sh"
+            exit 1
+          fi
