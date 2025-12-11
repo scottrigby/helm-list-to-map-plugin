@@ -20,8 +20,7 @@ type Values = map[string]interface{}
 type Rule struct {
 	PathPattern   string   `yaml:"pathPattern"`
 	UniqueKeys    []string `yaml:"uniqueKeys"`
-	Renderer      string   `yaml:"renderer"`
-	PromoteScalar string   `yaml:"promoteScalar"`
+	PromoteScalar string   `yaml:"promoteScalar,omitempty"`
 }
 
 // Config holds user-defined conversion rules
@@ -359,16 +358,14 @@ Flags:
 func runAddRule() {
 	path := ""
 	uniqueKey := ""
-	renderer := "generic"
 	fs := flag.NewFlagSet("add-rule", flag.ExitOnError)
 	fs.StringVar(&path, "path", "", "dot path to array (end with []), e.g. database.primary.extraEnv[]")
 	fs.StringVar(&uniqueKey, "uniqueKey", "", "unique key field, e.g. name")
-	fs.StringVar(&renderer, "renderer", "generic", "renderer hint: env|volumeMounts|volumes|ports|generic")
 	fs.StringVar(&configPath, "config", "", "path to user config")
 	fs.Usage = func() {
 		fmt.Print(`
-Add a custom conversion rule to your user configuration file. Use this when you need
-to convert arrays in custom CRDs or non-standard paths that aren't covered by built-in rules.
+Add a custom conversion rule to your user configuration file. Use this for CRDs
+and custom resources that cannot be introspected via K8s API.
 
 Usage:
   helm list-to-map add-rule [flags]
@@ -377,12 +374,11 @@ Flags:
       --config string      path to user config (default: $HELM_CONFIG_HOME/list-to-map/config.yaml)
   -h, --help               help for add-rule
       --path string        dot path to array (end with []), e.g. database.primary.extraEnv[]
-      --renderer string    renderer hint: env|volumeMounts|volumes|ports|generic (default: "generic")
       --uniqueKey string   unique key field, e.g. name
 
 Examples:
   helm list-to-map add-rule --path='istio.virtualService.http[]' --uniqueKey=name
-  helm list-to-map add-rule --path='myapp.listeners[]' --uniqueKey=port --renderer=generic
+  helm list-to-map add-rule --path='myapp.listeners[]' --uniqueKey=port
 `)
 	}
 	_ = fs.Parse(os.Args[2:])
@@ -393,7 +389,7 @@ Examples:
 		os.Exit(1)
 	}
 
-	r := Rule{PathPattern: path, UniqueKeys: []string{uniqueKey}, Renderer: renderer}
+	r := Rule{PathPattern: path, UniqueKeys: []string{uniqueKey}}
 	user := defaultUserConfigPath()
 	if err := os.MkdirAll(filepath.Dir(user), 0755); err != nil {
 		fatal(err)
@@ -407,7 +403,7 @@ Examples:
 	if err := os.WriteFile(user, out, 0644); err != nil {
 		fatal(err)
 	}
-	fmt.Printf("Added rule to %s: %s (key=%s, renderer=%s)\n", user, path, uniqueKey, renderer)
+	fmt.Printf("Added rule to %s: %s (key=%s)\n", user, path, uniqueKey)
 }
 
 func runListRules() {
@@ -415,8 +411,10 @@ func runListRules() {
 	for _, arg := range os.Args[2:] {
 		if arg == "-h" || arg == "--help" {
 			fmt.Print(`
-List all active conversion rules, including both built-in rules for common
-Kubernetes patterns and any custom rules you've added.
+List custom conversion rules for CRDs and custom resources.
+
+Note: Built-in K8s types are detected automatically via API introspection
+and do not require rules. Use 'detect' to see what will be converted.
 
 Usage:
   helm list-to-map rules [flags]
@@ -428,10 +426,15 @@ Flags:
 		}
 	}
 
-	all := conf.Rules
-	fmt.Println("Rules (built-in + user):")
-	for _, r := range all {
-		fmt.Printf("- %s (keys=%v, renderer=%s)\n", r.PathPattern, r.UniqueKeys, r.Renderer)
+	if len(conf.Rules) == 0 {
+		fmt.Println("No custom rules defined.")
+		fmt.Println("Built-in K8s types are detected automatically via API introspection.")
+		return
+	}
+
+	fmt.Println("Custom rules:")
+	for _, r := range conf.Rules {
+		fmt.Printf("- %s (key=%s)\n", r.PathPattern, r.UniqueKeys[0])
 	}
 }
 

@@ -18,17 +18,9 @@ commands:
     flags:
       - path
       - uniqueKey
-      - renderer
       - config
       - h
       - help
-    validArgs:
-      - env
-      - volumeMounts
-      - volumes
-      - ports
-      - containers
-      - generic
   - name: rules
     flags:
       - h
