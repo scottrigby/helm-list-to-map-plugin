@@ -28,3 +28,7 @@ After changing CLI help text, update the README:
 ```
 
 This requires the plugin to be installed (`helm plugin install /path/to/plugin/dir`).
+
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for planned enhancements and their status. Contributions welcome!
