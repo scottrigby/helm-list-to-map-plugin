@@ -134,29 +134,81 @@ Solution: Generate standardized comments for converted fields showing example ma
 
 ## Proposed Solutions
 
-### Solution 1: Template-First Detection (Core Change)
+### Solution 1: Fully Programmatic Template Analysis (Core Change)
+
+**Design Principles:**
+
+- Zero hardcoded K8s resource or field names
+- Derive all information from K8s API Go packages
+- Recursive template traversal (follow `include` chains)
+- Programmatic pattern detection (list vs map usage)
+- User-defined rules for CRDs/CRs where K8s API unavailable
 
 Implementation:
 
-1. Scan `templates/*.yaml` for list-rendering patterns
-2. Extract value paths (e.g., `.Values.volumeMounts`, `.Values.database.env`)
-3. Match paths against configured rules
-4. Build detection list from template analysis
-5. Apply to values.yaml regardless of whether arrays are empty or populated
+1. **Parse K8s Resource Type**
+   - Parse YAML to locate `apiVersion` and `kind`
+   - Initially support only explicit values (e.g., `kind: Deployment`)
+   - Skip templates with dynamic `kind: {{ .Values.resourceType }}` (handle later)
+   - Map to K8s API type: `apps/v1` + `Deployment` → `appsv1.Deployment`
+
+2. **Extract YAML Path Context**
+   - Determine where in K8s resource spec the template directive appears
+   - Example: `{{- toYaml .Values.volumes }}` under `spec.template.spec.volumes`
+   - Derive path: `spec.template.spec.volumes` in the K8s resource structure
+   - Store path for next validation step
+
+3. **Validate Field Schema** ← Fast check first
+   - Navigate K8s API type hierarchy to find field type at YAML path
+   - Check if field is a list type (`[]SomeType`)
+   - Use reflection to inspect element type for required unique fields
+   - Example: `[]corev1.Volume` → check `Volume.Name` field
+   - Verify unique field has no `omitempty` and is not a pointer
+   - No hardcoded field names - purely reflection-based
+   - **If not convertible, skip expensive include resolution**
+
+4. **Recursively Follow Include Chains** ← Expensive check only if schema valid
+   - When `{{- include "template.name" }}` found, load that template file
+   - Parse the included template for `.Values` references
+   - If included template has more `include` directives, follow those
+   - Continue until actual `.Values.*` usage is found
+   - Track visited templates to prevent infinite loops
+   - Record full include chain for debugging
+   - **Only execute if step 3 determined field is convertible**
+
+5. **Detect Usage Pattern**
+   - Analyze how `.Values` is used in the template or include chain:
+     - `toYaml .Values.X` → List pattern ✓
+     - `range .Values.X` (single variable) → List pattern ✓
+     - `range $k, $v := .Values.X` → Map pattern (skip)
+     - `include "chart.*.render"` → Already converted (skip)
+   - Pattern detection happens at the end of include chain where `.Values` is actually used
+
+6. **Build Conversion Candidates**
+   - Only suggest if ALL conditions met:
+     - K8s API field is a list with required unique field (from step 3)
+     - Currently using list pattern (from step 5, not already converted)
+     - Include chain successfully resolved to `.Values` usage (from step 4)
+   - Output includes: K8s type, field path, unique field name
 
 Changes:
 
-- New function: `scanTemplatesForListUsage(chartRoot) []PathInfo`
-- Modify `detect` command to run template scan first
-- Use template-detected paths + content-detected paths (union)
+- New: `parseTemplateStructure(templatePath) (KubeResource, error)`
+- New: `resolveKubeAPIType(apiVersion, kind) (reflect.Type, error)`
+- New: `extractYAMLPath(templateAST, valuesRef) (string, error)`
+- New: `navigateFieldSchema(kubeType, yamlPath) (FieldInfo, error)`
+- New: `detectValuesPattern(templateNode) (PatternType, error)`
+- New: `followIncludeChain(templateName, visited) ([]ValuesUsage, error)`
+- Modify: `scanTemplatesForListUsage` to use new programmatic approach
+- Remove: All hardcoded renderer mappings and rule patterns
 
 Example Output:
 
 ```
 Detected convertible arrays:
-· volumeMounts → key=name, renderer=volumeMounts (found in templates)
-· volumes → key=name, renderer=volumes (found in templates)
-· database.env → key=name, renderer=env (found in values)
+· volumeMounts → key=name, type=corev1.VolumeMount (Deployment.spec.template.spec.volumeMounts)
+· volumes → key=name, type=corev1.Volume (Deployment.spec.template.spec.volumes)
+· env → key=name, type=corev1.EnvVar (Deployment.spec.template.spec.containers[].env)
 ```
 
 ### Solution 2: Multi-File Conversion Support
@@ -287,43 +339,90 @@ This dual approach ensures:
 
 ## Implementation Priority
 
-### Phase 1: Template-First Detection (CRITICAL)
+### Phase 1: Template-First Detection (COMPLETE ✅)
 
-- [ ] Template Scanner
-  - [ ] Implement regex patterns for detecting list-rendering in templates
-  - [ ] Extract `.Values.*` paths from matches
-  - [ ] Match extracted paths against configured rules
-  - [ ] Return `[]PathInfo` for template-detected conversions
+- [x] Template Scanner
+  - [x] Implement regex patterns for detecting list-rendering in templates
+  - [x] Extract `.Values.*` paths from matches
+  - [x] Match extracted paths against configured rules
+  - [x] Return `[]PathInfo` for template-detected conversions
 
-- [ ] Update Detection Logic
-  - [ ] Run template scan before content analysis
-  - [ ] Combine template-detected + content-detected paths (union)
-  - [ ] Mark detection source (template vs values) in output
+- [x] Update Detection Logic
+  - [x] Run template scan before content analysis
+  - [x] Combine template-detected + content-detected paths (union)
+  - [x] Mark detection source (template vs values) in output
 
-- [ ] Empty Array Handling
-  - [ ] Detect empty `[]` arrays at template-identified paths
-  - [ ] Convert `[]` → `{}` for matched fields
-  - [ ] Ensure template rewriting works with empty values
+- [x] Empty Array Handling
+  - [x] Detect empty `[]` arrays at template-identified paths
+  - [x] Convert `[]` → `{}` for matched fields
+  - [x] Ensure template rewriting works with empty values
 
-### Phase 2: K8s API Validation (CRITICAL)
+### Phase 1.5: Refactor to Fully Programmatic Detection (NEW - IN PROGRESS)
 
-- [ ] API Type Infrastructure
-  - [ ] Add `k8s.io/api/core/v1` dependency
-  - [ ] Create type-to-struct mapping for built-in renderers
-  - [ ] Implement `getAPIType(renderer) reflect.Type` function
-  - [ ] Implement `isRequiredField(apiType, fieldName) bool` validation
+**Goal**: Remove all hardcoded K8s resource/field names, use pure K8s API introspection
 
-- [ ] Update Built-in Rules with Validation
-  - [ ] Validate `env` → `corev1.EnvVar.Name` is required
-  - [ ] Validate `volumeMounts` → `corev1.VolumeMount.Name` is required
-  - [ ] Validate `volumes` → `corev1.Volume.Name` is required
-  - [ ] Check `ports` → `corev1.ContainerPort.Name` (may be optional!)
-  - [ ] Filter out rules where unique key is optional
+- [ ] Step 1: Parse K8s Resource Type
+  - [ ] Parse YAML to extract `apiVersion` and `kind` (explicit only)
+  - [ ] Create apiVersion + kind → Go type mapper (apps/v1.Deployment → appsv1.Deployment)
+  - [ ] Add dependencies for common K8s API groups (apps, batch, networking, etc.)
+  - [ ] Skip templates with dynamic kind for now
 
-- [ ] Update Detection & Conversion Logic
-  - [ ] Skip conversion if unique key is optional in K8s API
-  - [ ] Add warning messages for skipped optional keys
-  - [ ] Update rule matching to check API validation
+- [ ] Step 2: Extract YAML Path Context
+  - [ ] Build YAML structure tree from template
+  - [ ] Track position of template directives ({{...}}) in YAML hierarchy
+  - [ ] Derive K8s API path (e.g., spec.template.spec.volumes)
+  - [ ] Handle array indicators in paths (containers[].env)
+
+- [ ] Step 3: Validate Field Schema (Fast check - do first)
+  - [ ] Use reflection to navigate K8s API type hierarchy
+  - [ ] Follow YAML path through struct (Deployment.Spec → PodSpec → []Volume)
+  - [ ] Check if field at path is a slice type
+  - [ ] If slice, check if element type has any field named "Name"
+  - [ ] Verify Name field is required (no omitempty, not pointer)
+  - [ ] Use reflection only - no hardcoded field names
+  - [ ] If not convertible, skip step 4 entirely (optimization)
+
+- [ ] Step 4: Recursive Include Resolution (Expensive - only if step 3 passed)
+  - [ ] Detect `{{- include "template.name" }}` in template directives
+  - [ ] Load included template files from templates/ directory
+  - [ ] Parse included templates for `.Values` or more `include` statements
+  - [ ] Recursively follow chains until `.Values.*` found
+  - [ ] Track visited templates (map[string]bool) to prevent loops
+  - [ ] Record full include chain for debugging
+  - [ ] Only execute if step 3 determined field is convertible
+
+- [ ] Step 5: Detect Usage Pattern
+  - [ ] Parse template directive at end of include chain
+  - [ ] Identify list patterns: `toYaml .Values.X`, `range .Values.X` (single var)
+  - [ ] Identify map patterns: `range $k, $v := .Values.X`, `include "chart.*.render"`
+  - [ ] Skip fields already using map pattern
+
+- [ ] Step 6: Remove Hardcoded Dependencies
+  - [ ] Delete defaultConfig() built-in rules
+  - [ ] Remove getAPIType() renderer switch
+  - [ ] Keep user-defined rules (load from config)
+  - [ ] Update output format to show K8s type instead of renderer
+
+### Phase 2: K8s API Validation (COMPLETE ✅)
+
+- [x] API Type Infrastructure
+  - [x] Add `k8s.io/api/core/v1` dependency
+  - [x] Create type-to-struct mapping for built-in renderers
+  - [x] Implement `getAPIType(renderer) reflect.Type` function
+  - [x] Implement `isRequiredField(apiType, fieldName) bool` validation
+
+- [x] Update Built-in Rules with Validation
+  - [x] Validate `env` → `corev1.EnvVar.Name` is required
+  - [x] Validate `volumeMounts` → `corev1.VolumeMount.Name` is required
+  - [x] Validate `volumes` → `corev1.Volume.Name` is required
+  - [x] Check `ports` → `corev1.ContainerPort.Name` (optional - filtered out!)
+  - [x] Filter out rules where unique key is optional
+
+- [x] Update Detection & Conversion Logic
+  - [x] Skip conversion if unique key is optional in K8s API
+  - [x] Validation integrated into template scanner and converter
+
+**Note**: Phase 1.5 will refactor this to remove hardcoded mappings
 
 ### Phase 3: Comment Generation (DEFERRED to after validation)
 

@@ -8,16 +8,15 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
-	corev1 "k8s.io/api/core/v1"
 )
 
 type Values = map[string]interface{}
 
+// Rule represents a user-defined conversion rule for CRDs and custom resources
 type Rule struct {
 	PathPattern   string   `yaml:"pathPattern"`
 	UniqueKeys    []string `yaml:"uniqueKeys"`
@@ -25,6 +24,7 @@ type Rule struct {
 	PromoteScalar string   `yaml:"promoteScalar"`
 }
 
+// Config holds user-defined conversion rules
 type Config struct {
 	Rules              []Rule `yaml:"rules"`
 	LastWinsDuplicates bool   `yaml:"lastWinsDuplicates"`
@@ -32,9 +32,9 @@ type Config struct {
 }
 
 type PathInfo struct {
-	DotPath   string
-	Renderer  string
-	UniqueKey string
+	DotPath     string
+	MergeKey    string // The patchMergeKey from K8s API (e.g., "name", "mountPath", "containerPort")
+	SectionName string // The YAML section name (e.g., "volumes", "volumeMounts", "ports")
 }
 
 var (
@@ -46,65 +46,6 @@ var (
 	conf             Config
 	transformedPaths []PathInfo
 )
-
-// K8s API type mapping for built-in renderers
-func getAPIType(renderer string) reflect.Type {
-	switch renderer {
-	case "env":
-		return reflect.TypeOf(corev1.EnvVar{})
-	case "volumeMounts":
-		return reflect.TypeOf(corev1.VolumeMount{})
-	case "volumes":
-		return reflect.TypeOf(corev1.Volume{})
-	case "ports":
-		return reflect.TypeOf(corev1.ContainerPort{})
-	case "containers":
-		return reflect.TypeOf(corev1.Container{})
-	default:
-		return nil
-	}
-}
-
-// isRequiredField checks if a field is required (not optional) in the K8s API.
-// A field is considered required if:
-// - It exists in the API type
-// - It doesn't have "omitempty" in its json tag
-// - It's not a pointer type (pointers indicate optional fields)
-func isRequiredField(apiType reflect.Type, fieldName string) bool {
-	if apiType == nil {
-		return false
-	}
-
-	// Convert field name to Go struct field name (capitalize first letter)
-	goFieldName := strings.ToUpper(fieldName[:1]) + fieldName[1:]
-
-	field, found := apiType.FieldByName(goFieldName)
-	if !found {
-		return false
-	}
-
-	jsonTag := field.Tag.Get("json")
-	// Field is required if it doesn't have omitempty AND is not a pointer
-	hasOmitempty := strings.Contains(jsonTag, "omitempty")
-	isPointer := field.Type.Kind() == reflect.Ptr
-
-	return !hasOmitempty && !isPointer
-}
-
-// validateUniqueKey checks if the unique key is valid for the given renderer.
-// For built-in K8s types, it validates against the API schema.
-// For generic/custom types, it always returns true.
-func validateUniqueKey(renderer string, uniqueKey string) bool {
-	apiType := getAPIType(renderer)
-	if apiType == nil {
-		// No API type available (generic renderer or custom CRD)
-		// Allow conversion - user knows their schema
-		return true
-	}
-
-	// For K8s types, require the unique key to be a required field
-	return isRequiredField(apiType, uniqueKey)
-}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -119,16 +60,12 @@ func main() {
 		return
 	}
 
-	// Load config for all commands (needed for rules display)
-	conf = defaultConfig()
+	// Load user-defined rules for CRDs and custom resources
 	if configPath == "" {
 		configPath = defaultUserConfigPath()
 	}
 	if b, err := os.ReadFile(configPath); err == nil {
-		var uc Config
-		if yaml.Unmarshal(b, &uc) == nil {
-			mergeConfig(&conf, &uc)
-		}
+		_ = yaml.Unmarshal(b, &conf)
 	}
 
 	switch subcmd {
@@ -194,36 +131,25 @@ Flags:
 		fatal(err)
 	}
 
-	// Phase 1: Template-first detection - scan templates for list usage
-	templateDetected, err := scanTemplatesForListUsage(root)
+	// Use new programmatic detection via K8s API introspection
+	candidates, err := detectConversionCandidates(root)
 	if err != nil {
 		fatal(err)
 	}
 
-	// Phase 2: Content-based detection - scan values.yaml for populated arrays
-	valuesPath := filepath.Join(root, "values.yaml")
-	values, _, err := loadValues(valuesPath)
-	if err != nil {
-		fatal(err)
+	// Also check for user-defined rules (for CRDs)
+	userDetected := scanForUserRules(root)
+
+	// Combine both sources
+	allDetected := make(map[string]DetectedCandidate)
+	for _, c := range candidates {
+		allDetected[c.ValuesPath] = c
 	}
-	var report strings.Builder
-	_ = migrateRecursive(values, nil, &report, true, nil)
-
-	// Combine both detection sources
-	allDetected := make(map[string]PathInfo)
-
-	// Add template-detected paths
-	for _, info := range templateDetected {
-		allDetected[info.DotPath] = info
+	for _, c := range userDetected {
+		if _, exists := allDetected[c.ValuesPath]; !exists {
+			allDetected[c.ValuesPath] = c
+		}
 	}
-
-	// Add content-detected paths (from migrateRecursive via transformedPaths)
-	for _, info := range transformedPaths {
-		allDetected[info.DotPath] = info
-	}
-
-	// Clear transformedPaths for next run
-	transformedPaths = nil
 
 	if len(allDetected) == 0 {
 		fmt.Println("No convertible lists detected.")
@@ -232,13 +158,97 @@ Flags:
 
 	fmt.Println("Detected convertible arrays:")
 	for _, info := range allDetected {
-		source := "(found in templates)"
-		// Check if also found in values
-		if report.Len() > 0 && strings.Contains(report.String(), info.DotPath) {
-			source = "(found in templates and values)"
+		typeInfo := ""
+		if info.ElementType != "" {
+			typeInfo = fmt.Sprintf(", type=%s", info.ElementType)
 		}
-		fmt.Printf("· %s → key=%s, renderer=%s %s\n", info.DotPath, info.UniqueKey, info.Renderer, source)
+		fmt.Printf("· %s → key=%s%s\n", info.ValuesPath, info.MergeKey, typeInfo)
 	}
+}
+
+// scanForUserRules scans templates using user-defined rules (for CRDs)
+func scanForUserRules(chartRoot string) []DetectedCandidate {
+	var detected []DetectedCandidate
+	seen := make(map[string]bool)
+
+	// Only process user-defined rules (not built-in ones)
+	if len(conf.Rules) == 0 {
+		return detected
+	}
+
+	tdir := filepath.Join(chartRoot, "templates")
+
+	// Regex patterns for detecting list-rendering in templates
+	reToYaml := regexp.MustCompile(`\{\{-?\s*toYaml\s+\.Values\.([a-zA-Z0-9_.]+)\s*\|`)
+	reWith := regexp.MustCompile(`\{\{-?\s*with\s+\.Values\.([a-zA-Z0-9_.]+)\s*\}\}`)
+	reRange := regexp.MustCompile(`\{\{-?\s*range\s+.*?\.Values\.([a-zA-Z0-9_.]+)\s*\}\}`)
+
+	_ = filepath.WalkDir(tdir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		if !strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml") && !strings.HasSuffix(path, ".tpl") {
+			return nil
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		content := string(data)
+
+		// Extract all .Values.* paths from template patterns
+		paths := make(map[string]bool)
+		for _, match := range reToYaml.FindAllStringSubmatch(content, -1) {
+			if len(match) > 1 {
+				paths[match[1]] = true
+			}
+		}
+		for _, match := range reWith.FindAllStringSubmatch(content, -1) {
+			if len(match) > 1 {
+				paths[match[1]] = true
+			}
+		}
+		for _, match := range reRange.FindAllStringSubmatch(content, -1) {
+			if len(match) > 1 {
+				paths[match[1]] = true
+			}
+		}
+
+		// Check each extracted path against user rules
+		for pathStr := range paths {
+			if seen[pathStr] {
+				continue
+			}
+
+			segments := strings.Split(pathStr, ".")
+			rule := matchRule(segments)
+			if rule == nil {
+				continue
+			}
+
+			// Determine unique key
+			uniqueKey := rule.UniqueKeys[0]
+			for _, k := range rule.UniqueKeys {
+				if k == "name" {
+					uniqueKey = k
+					break
+				}
+			}
+
+			seen[pathStr] = true
+			detected = append(detected, DetectedCandidate{
+				ValuesPath:  pathStr,
+				MergeKey:    uniqueKey,
+				ElementType: "(user rule)",
+				SectionName: getLastPathSegment(pathStr),
+			})
+		}
+
+		return nil
+	})
+
+	return detected
 }
 
 func runConvert() {
@@ -254,8 +264,8 @@ and automatically update corresponding template files. This command modifies fil
 in place, creating backups with the specified extension.
 
 The conversion process:
-  1. Scans templates for list usage patterns
-  2. Scans values.yaml for arrays matching configured patterns
+  1. Scans templates using K8s API introspection
+  2. Identifies list fields with required unique keys
   3. Converts matching arrays to maps using unique key fields
   4. Updates template files to use new helper functions
   5. Generates helper templates if they don't exist
@@ -278,16 +288,20 @@ Flags:
 		fatal(err)
 	}
 
-	// Phase 1: Template-first detection
-	templateDetected, err := scanTemplatesForListUsage(root)
+	// Use new programmatic detection via K8s API introspection
+	candidates, err := detectConversionCandidates(root)
 	if err != nil {
 		fatal(err)
 	}
 
+	// Also check for user-defined rules (for CRDs)
+	userDetected := scanForUserRules(root)
+	candidates = append(candidates, userDetected...)
+
 	// Build map of paths to convert for empty array handling
-	templatePaths := make(map[string]PathInfo)
-	for _, info := range templateDetected {
-		templatePaths[info.DotPath] = info
+	candidateMap := make(map[string]DetectedCandidate)
+	for _, c := range candidates {
+		candidateMap[c.ValuesPath] = c
 	}
 
 	valuesPath := filepath.Join(root, "values.yaml")
@@ -296,7 +310,7 @@ Flags:
 		fatal(err)
 	}
 	var report strings.Builder
-	changed := migrateRecursive(values, nil, &report, false, templatePaths)
+	changed := migrateValues(values, nil, &report, false, candidateMap)
 	if changed {
 		out, err := marshalYAML(values)
 		if err != nil {
@@ -318,17 +332,26 @@ Flags:
 		fmt.Println("No changes needed in values.yaml.")
 	}
 
-	tchanges, err := rewriteTemplates(root, transformedPaths)
-	if err != nil {
-		fatal(err)
-	}
-	for _, ch := range tchanges {
-		fmt.Printf("- Updated template: %s\n", ch)
+	var tchanges []string
+	if !dryRun {
+		var err error
+		tchanges, err = rewriteTemplatesNew(root, transformedPaths)
+		if err != nil {
+			fatal(err)
+		}
+		for _, ch := range tchanges {
+			fmt.Printf("- Updated template: %s\n", ch)
+		}
+
+		ensureHelpers(root)
+	} else if len(transformedPaths) > 0 {
+		fmt.Println("Template changes would be applied (use without --dry-run to apply):")
+		for _, p := range transformedPaths {
+			fmt.Printf("- Would update templates using %s\n", p.DotPath)
+		}
 	}
 
-	ensureHelpers(root)
-
-	if !changed && len(tchanges) == 0 {
+	if !changed && len(tchanges) == 0 && !dryRun {
 		fmt.Println("Nothing to convert.")
 	}
 }
@@ -420,33 +443,6 @@ func defaultUserConfigPath() string {
 	return filepath.Join(home, "list-to-map", "config.yaml")
 }
 
-func defaultConfig() Config {
-	return Config{
-		Rules: []Rule{
-			{PathPattern: "*.env[]", UniqueKeys: []string{"name"}, Renderer: "env", PromoteScalar: "env:value"},
-			{PathPattern: "*.*.extraEnv[]", UniqueKeys: []string{"name"}, Renderer: "env"},
-			{PathPattern: "*.volumeMounts[]", UniqueKeys: []string{"name", "mountPath"}, Renderer: "volumeMounts"},
-			{PathPattern: "*.volumes[]", UniqueKeys: []string{"name"}, Renderer: "volumes"},
-			{PathPattern: "*.ports[]", UniqueKeys: []string{"name", "containerPort", "port"}, Renderer: "ports"},
-			{PathPattern: "*.imagePullSecrets[]", UniqueKeys: []string{"name"}, Renderer: "generic"},
-			{PathPattern: "*.httpGet.headers[]", UniqueKeys: []string{"name"}, Renderer: "generic"},
-			{PathPattern: "*.containers[]", UniqueKeys: []string{"name"}, Renderer: "containers"},
-		},
-		LastWinsDuplicates: true,
-		SortKeys:           true,
-	}
-}
-
-func mergeConfig(base, add *Config) {
-	base.Rules = append(base.Rules, add.Rules...)
-	if add.LastWinsDuplicates {
-		base.LastWinsDuplicates = true
-	}
-	if add.SortKeys {
-		base.SortKeys = true
-	}
-}
-
 func findChartRoot(start string) (string, error) {
 	p := start
 	for {
@@ -489,71 +485,11 @@ func backupFile(path, ext string, original []byte) error {
 	return os.WriteFile(path+ext, original, 0644)
 }
 
-func migrateRecursive(node interface{}, path []string, report *strings.Builder, detectOnly bool, templatePaths map[string]PathInfo) bool {
-	changed := false
-	switch t := node.(type) {
-	case map[string]interface{}:
-		for k, v := range t {
-			p := append(path, k)
-			dp := dotPath(p)
-
-			// Check if this path should be converted based on template detection
-			if templateInfo, isTemplateDetected := templatePaths[dp]; isTemplateDetected {
-				// Handle empty array case: [] -> {}
-				if arr, ok := v.([]interface{}); ok && len(arr) == 0 {
-					if detectOnly {
-						// Don't report empty arrays in detect mode - they're handled by template scan
-						continue
-					}
-					// Convert empty array to empty map
-					t[k] = map[string]interface{}{}
-					changed = true
-					report.WriteString(fmt.Sprintf("- Migrated %s (key=%s, renderer=%s) [empty array]\n", templateInfo.DotPath, templateInfo.UniqueKey, templateInfo.Renderer))
-					transformedPaths = append(transformedPaths, templateInfo)
-					continue
-				}
-			}
-
-			if v == nil {
-				continue
-			}
-			if arr, ok := v.([]interface{}); ok {
-				if out, did, info := convertArrayAtPath(arr, p, detectOnly); did {
-					if detectOnly {
-						report.WriteString(fmt.Sprintf("· %s → key=%s, renderer=%s\n", info.DotPath, info.UniqueKey, info.Renderer))
-					} else {
-						t[k] = out
-						changed = true
-						report.WriteString(fmt.Sprintf("- Migrated %s (key=%s, renderer=%s)\n", info.DotPath, info.UniqueKey, info.Renderer))
-						transformedPaths = append(transformedPaths, info)
-					}
-				} else {
-					for i := range arr {
-						if migrateRecursive(arr[i], append(p, fmt.Sprintf("[%d]", i)), report, detectOnly, templatePaths) {
-							changed = true
-						}
-					}
-				}
-				continue
-			}
-			if migrateRecursive(v, p, report, detectOnly, templatePaths) {
-				changed = true
-			}
-		}
-	case []interface{}:
-		for i := range t {
-			if migrateRecursive(t[i], append(path, fmt.Sprintf("[%d]", i)), report, detectOnly, templatePaths) {
-				changed = true
-			}
-		}
-	}
-	return changed
-}
-
 func dotPath(path []string) string {
 	return strings.Join(path, ".")
 }
 
+// matchRule checks if a path matches any user-defined rule (for CRDs)
 func matchRule(path []string) *Rule {
 	dp := dotPath(path) + "[]"
 	for _, r := range conf.Rules {
@@ -590,83 +526,6 @@ func matchGlob(pattern, text string) bool {
 	return true
 }
 
-func convertArrayAtPath(arr []interface{}, path []string, detectOnly bool) (interface{}, bool, PathInfo) {
-	rule := matchRule(path)
-	if rule == nil {
-		return arr, false, PathInfo{}
-	}
-	key := pickKey(arr, rule.UniqueKeys)
-	if key == "" {
-		return arr, false, PathInfo{}
-	}
-
-	// Validate that the unique key is required (not optional) in K8s API
-	if !validateUniqueKey(rule.Renderer, key) {
-		// Skip conversion - unique key is optional
-		return arr, false, PathInfo{}
-	}
-
-	if detectOnly {
-		return nil, true, PathInfo{DotPath: dotPath(path), Renderer: rule.Renderer, UniqueKey: key}
-	}
-
-	out := map[string]interface{}{}
-	dups := map[string]int{}
-	missing := 0
-
-	for _, it := range arr {
-		m, ok := it.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		nameAny, has := m[key]
-		nameStr, _ := nameAny.(string)
-		if !has || strings.TrimSpace(nameStr) == "" {
-			missing++
-			continue
-		}
-		entry := copyWithoutKey(m, key)
-		if _, exists := out[nameStr]; exists {
-			dups[nameStr]++
-		}
-		out[nameStr] = entry
-	}
-
-	_ = dups
-	_ = missing
-	info := PathInfo{DotPath: dotPath(path), Renderer: rule.Renderer, UniqueKey: key}
-	return out, true, info
-}
-
-func pickKey(arr []interface{}, candidates []string) string {
-	counts := make(map[string]int)
-	for _, it := range arr {
-		m, ok := it.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		for _, k := range candidates {
-			if v, ok := m[k]; ok {
-				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-					counts[k]++
-				}
-			}
-		}
-	}
-	best := ""
-	bestCount := 0
-	for _, k := range candidates {
-		if counts[k] > bestCount {
-			best = k
-			bestCount = counts[k]
-		}
-	}
-	if bestCount*2 >= len(arr) && best != "" {
-		return best
-	}
-	return ""
-}
-
 func copyWithoutKey(m map[string]interface{}, key string) map[string]interface{} {
 	out := make(map[string]interface{}, len(m))
 	for k, v := range m {
@@ -678,99 +537,106 @@ func copyWithoutKey(m map[string]interface{}, key string) map[string]interface{}
 	return out
 }
 
-// scanTemplatesForListUsage scans templates directory for list-rendering patterns
-// and returns PathInfo for arrays that match configured rules, regardless of
-// whether the arrays are empty or populated in values.yaml
-func scanTemplatesForListUsage(chartRoot string) ([]PathInfo, error) {
-	var detected []PathInfo
-	seen := make(map[string]bool) // dedup by dotPath
-	tdir := filepath.Join(chartRoot, "templates")
+// migrateValues migrates arrays to maps based on detected candidates from K8s API introspection
+func migrateValues(node interface{}, path []string, report *strings.Builder, detectOnly bool, candidates map[string]DetectedCandidate) bool {
+	changed := false
+	switch t := node.(type) {
+	case map[string]interface{}:
+		for k, v := range t {
+			p := append(path, k)
+			dp := dotPath(p)
 
-	// Regex patterns for detecting list-rendering in templates:
-	// 1. toYaml pattern: {{- toYaml .Values.path | nindent N }}
-	reToYaml := regexp.MustCompile(`\{\{-?\s*toYaml\s+\.Values\.([a-zA-Z0-9_.]+)\s*\|`)
-	// 2. with + toYaml pattern: {{- with .Values.path }} ... {{- toYaml . | ... }}
-	reWith := regexp.MustCompile(`\{\{-?\s*with\s+\.Values\.([a-zA-Z0-9_.]+)\s*\}\}`)
-	// 3. range pattern: {{- range .Values.path }}
-	reRange := regexp.MustCompile(`\{\{-?\s*range\s+.*?\.Values\.([a-zA-Z0-9_.]+)\s*\}\}`)
-
-	err := filepath.WalkDir(tdir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		if !strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml") && !strings.HasSuffix(path, ".tpl") {
-			return nil
-		}
-
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		content := string(data)
-
-		// Extract all .Values.* paths from template patterns
-		paths := make(map[string]bool)
-		for _, match := range reToYaml.FindAllStringSubmatch(content, -1) {
-			if len(match) > 1 {
-				paths[match[1]] = true
-			}
-		}
-		for _, match := range reWith.FindAllStringSubmatch(content, -1) {
-			if len(match) > 1 {
-				paths[match[1]] = true
-			}
-		}
-		for _, match := range reRange.FindAllStringSubmatch(content, -1) {
-			if len(match) > 1 {
-				paths[match[1]] = true
-			}
-		}
-
-		// Check each extracted path against configured rules
-		for pathStr := range paths {
-			if seen[pathStr] {
-				continue
-			}
-
-			// Convert dot path to path segments for rule matching
-			// matchRule expects segments and will add [] internally
-			segments := strings.Split(pathStr, ".")
-			rule := matchRule(segments)
-			if rule == nil {
-				continue
-			}
-
-			// Determine unique key - prefer 'name' if available, otherwise use first key
-			uniqueKey := rule.UniqueKeys[0]
-			for _, k := range rule.UniqueKeys {
-				if k == "name" {
-					uniqueKey = k
-					break
+			// Check if this path should be converted based on detection
+			if candidate, isDetected := candidates[dp]; isDetected {
+				// Handle empty array case: [] -> {}
+				if arr, ok := v.([]interface{}); ok && len(arr) == 0 {
+					if detectOnly {
+						continue
+					}
+					// Convert empty array to empty map
+					t[k] = map[string]interface{}{}
+					changed = true
+					report.WriteString(fmt.Sprintf("- Migrated %s (key=%s) [empty array]\n", candidate.ValuesPath, candidate.MergeKey))
+					transformedPaths = append(transformedPaths, PathInfo{
+						DotPath:     candidate.ValuesPath,
+						MergeKey:    candidate.MergeKey,
+						SectionName: candidate.SectionName,
+					})
+					continue
+				}
+				// Handle populated array
+				if arr, ok := v.([]interface{}); ok && len(arr) > 0 {
+					out, did := convertArrayWithCandidate(arr, candidate)
+					if did {
+						if detectOnly {
+							report.WriteString(fmt.Sprintf("· %s → key=%s\n", candidate.ValuesPath, candidate.MergeKey))
+						} else {
+							t[k] = out
+							changed = true
+							report.WriteString(fmt.Sprintf("- Migrated %s (key=%s)\n", candidate.ValuesPath, candidate.MergeKey))
+							transformedPaths = append(transformedPaths, PathInfo{
+								DotPath:     candidate.ValuesPath,
+								MergeKey:    candidate.MergeKey,
+								SectionName: candidate.SectionName,
+							})
+						}
+						continue
+					}
 				}
 			}
 
-			// Validate that the unique key is required (not optional) in K8s API
-			if !validateUniqueKey(rule.Renderer, uniqueKey) {
-				// Skip this path - unique key is optional
+			if v == nil {
 				continue
 			}
-
-			// Found a valid match - this path should be converted
-			seen[pathStr] = true
-			detected = append(detected, PathInfo{
-				DotPath:   pathStr,
-				Renderer:  rule.Renderer,
-				UniqueKey: uniqueKey,
-			})
+			// Recurse into nested structures
+			if _, ok := v.([]interface{}); ok {
+				if migrateValues(v, p, report, detectOnly, candidates) {
+					changed = true
+				}
+				continue
+			}
+			if migrateValues(v, p, report, detectOnly, candidates) {
+				changed = true
+			}
 		}
-
-		return nil
-	})
-
-	return detected, err
+	case []interface{}:
+		for i := range t {
+			if migrateValues(t[i], append(path, fmt.Sprintf("[%d]", i)), report, detectOnly, candidates) {
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
-func rewriteTemplates(chartPath string, paths []PathInfo) ([]string, error) {
+// convertArrayWithCandidate converts an array to a map using the candidate's merge key
+func convertArrayWithCandidate(arr []interface{}, candidate DetectedCandidate) (map[string]interface{}, bool) {
+	out := map[string]interface{}{}
+	key := candidate.MergeKey
+
+	for _, it := range arr {
+		m, ok := it.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		nameAny, has := m[key]
+		nameStr, _ := nameAny.(string)
+		if !has || strings.TrimSpace(nameStr) == "" {
+			continue
+		}
+		entry := copyWithoutKey(m, key)
+		out[nameStr] = entry
+	}
+
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// rewriteTemplatesNew rewrites templates using the new PathInfo structure
+// Uses a single generic helper that takes key and section as parameters
+func rewriteTemplatesNew(chartPath string, paths []PathInfo) ([]string, error) {
 	var changed []string
 	tdir := filepath.Join(chartPath, "templates")
 	err := filepath.WalkDir(tdir, func(path string, d fs.DirEntry, err error) error {
@@ -785,28 +651,18 @@ func rewriteTemplates(chartPath string, paths []PathInfo) ([]string, error) {
 			return err
 		}
 		orig := string(data)
-		new := orig
+		newContent := orig
 
 		for _, p := range paths {
-			switch p.Renderer {
-			case "env":
-				new = replaceEnvBlocksForPath(new, p.DotPath)
-			case "volumeMounts":
-				new = replaceBlocksForPath(new, p.DotPath, "chart.volumeMounts.render", "volumeMounts")
-			case "volumes":
-				new = replaceBlocksForPath(new, p.DotPath, "chart.volumes.render", "volumes")
-			case "ports":
-				new = replaceBlocksForPath(new, p.DotPath, "chart.ports.render", "ports")
-			case "generic":
-				new = replaceBlocksForPath(new, p.DotPath, "chart.listmap.render", "items")
-			}
+			// Use single generic helper for all conversions
+			newContent = replaceListBlocks(newContent, p.DotPath, p.MergeKey, p.SectionName)
 		}
 
-		if new != orig {
+		if newContent != orig {
 			if err := backupFile(path, backupExt, data); err != nil {
 				return err
 			}
-			if err := os.WriteFile(path, []byte(new), 0644); err != nil {
+			if err := os.WriteFile(path, []byte(newContent), 0644); err != nil {
 				return err
 			}
 			changed = append(changed, rel(chartPath, path))
@@ -816,23 +672,32 @@ func rewriteTemplates(chartPath string, paths []PathInfo) ([]string, error) {
 	return changed, err
 }
 
-func replaceEnvBlocksForPath(tpl, dotPath string) string {
-	reA := regexp.MustCompile(`(?ms)env:\s*\n\s*\{\{\-?\s*toYaml\s+\.Values\.` + regexp.QuoteMeta(dotPath) + `\s*\|\s*nindent\s*\d+\s*\}\}`)
-	tpl = reA.ReplaceAllString(tpl, `{{- include "chart.env.render" (dict "env" (index .Values `+quotePath(dotPath)+`)) }}`)
-	reB := regexp.MustCompile(`(?ms){{-?\s*with\s+\.Values\.` + regexp.QuoteMeta(dotPath) + `\s*}}\s*env:\s*\n\s*\{\{\-?\s*toYaml\s+\.\s*\|\s*nindent\s*\d+\s*\}\}\s*{{-?\s*end\s*}}`)
-	tpl = reB.ReplaceAllString(tpl, `{{- include "chart.env.render" (dict "env" (index .Values `+quotePath(dotPath)+`)) }}`)
-	reC := regexp.MustCompile(`(?ms)env:\s*\n\s*\{\{\-?\s*range\s+.*?\.Values\.` + regexp.QuoteMeta(dotPath) + `\s*\}\}.*?\{\{\-?\s*end\s*\}\}`)
-	tpl = reC.ReplaceAllString(tpl, `{{- include "chart.env.render" (dict "env" (index .Values `+quotePath(dotPath)+`)) }}`)
-	return tpl
-}
+// replaceListBlocks replaces list rendering patterns with the generic helper
+// Parameters:
+//   - dotPath: the .Values path (e.g., "volumes")
+//   - mergeKey: the patchMergeKey from K8s API (e.g., "name", "mountPath")
+//   - sectionName: the YAML section name (e.g., "volumes", "volumeMounts")
+func replaceListBlocks(tpl, dotPath, mergeKey, sectionName string) string {
+	helperCall := fmt.Sprintf(`{{- include "chart.listmap.render" (dict "items" (index .Values %s) "key" %q "section" %q) }}`,
+		quotePath(dotPath), mergeKey, sectionName)
 
-func replaceBlocksForPath(tpl, dotPath, includeName, section string) string {
-	reA := regexp.MustCompile(`(?ms)` + section + `:\s*\n\s*\{\{\-?\s*toYaml\s+\.Values\.` + regexp.QuoteMeta(dotPath) + `\s*\|\s*nindent\s*\d+\s*\}\}`)
-	tpl = reA.ReplaceAllString(tpl, `{{- include "`+includeName+`" (dict "`+section+`" (index .Values `+quotePath(dotPath)+`)) }}`)
-	reB := regexp.MustCompile(`(?ms){{-?\s*with\s+\.Values\.` + regexp.QuoteMeta(dotPath) + `\s*}}\s*` + section + `:\s*\n\s*\{\{\-?\s*toYaml\s+\.\s*\|\s*nindent\s*\d+\s*\}\}\s*{{-?\s*end\s*}}`)
-	tpl = reB.ReplaceAllString(tpl, `{{- include "`+includeName+`" (dict "`+section+`" (index .Values `+quotePath(dotPath)+`)) }}`)
-	reC := regexp.MustCompile(`(?ms)` + section + `:\s*\n\s*\{\{\-?\s*range\s+.*?\.Values\.` + regexp.QuoteMeta(dotPath) + `\s*\}\}.*?\{\{\-?\s*end\s*\}\}`)
-	tpl = reC.ReplaceAllString(tpl, `{{- include "`+includeName+`" (dict "`+section+`" (index .Values `+quotePath(dotPath)+`)) }}`)
+	// Pattern 1: section:\n  {{- toYaml .Values.X | nindent N }}
+	reA := regexp.MustCompile(`(?ms)` + regexp.QuoteMeta(sectionName) + `:\s*\n\s*\{\{\-?\s*toYaml\s+\.Values\.` + regexp.QuoteMeta(dotPath) + `\s*\|\s*nindent\s*\d+\s*\}\}`)
+	tpl = reA.ReplaceAllString(tpl, helperCall)
+
+	// Pattern 2: {{- with .Values.X }}\nsection:\n  {{- toYaml . | nindent N }}\n{{- end }}
+	reB := regexp.MustCompile(`(?ms)\{\{-?\s*with\s+\.Values\.` + regexp.QuoteMeta(dotPath) + `\s*\}\}\s*` + regexp.QuoteMeta(sectionName) + `:\s*\n\s*\{\{\-?\s*toYaml\s+\.\s*\|\s*nindent\s*\d+\s*\}\}\s*\{\{-?\s*end\s*\}\}`)
+	tpl = reB.ReplaceAllString(tpl, helperCall)
+
+	// Pattern 3: section:\n  {{- range .Values.X }}...{{- end }}
+	reC := regexp.MustCompile(`(?ms)` + regexp.QuoteMeta(sectionName) + `:\s*\n\s*\{\{\-?\s*range\s+.*?\.Values\.` + regexp.QuoteMeta(dotPath) + `\s*\}\}.*?\{\{\-?\s*end\s*\}\}`)
+	tpl = reC.ReplaceAllString(tpl, helperCall)
+
+	// Pattern 4: {{- include "chart.X.render" (dict "X" ...) }} - existing helper calls
+	// This handles templates that were already converted with specialized helpers
+	reD := regexp.MustCompile(`\{\{-?\s*include\s+"chart\.` + regexp.QuoteMeta(sectionName) + `\.render"\s*\(dict\s+"` + regexp.QuoteMeta(sectionName) + `"\s*\(index\s+\.Values\s+` + regexp.QuoteMeta(quotePath(dotPath)) + `\)\)\s*\}\}`)
+	tpl = reD.ReplaceAllString(tpl, helperCall)
+
 	return tpl
 }
 
@@ -853,90 +718,32 @@ func rel(root, p string) string {
 }
 
 func ensureHelpers(root string) {
-	write := func(name, content string) {
-		path := filepath.Join(root, "templates", name)
-		if _, err := os.Stat(path); err == nil {
-			return
-		}
-		_ = os.WriteFile(path, []byte(strings.TrimSpace(content)+"\n"), 0644)
+	path := filepath.Join(root, "templates", "_listmap.tpl")
+	if _, err := os.Stat(path); err == nil {
+		return
 	}
-	write("_env.tpl", envHelper())
-	write("_volumeMounts.tpl", volumeMountsHelper())
-	write("_volumes.tpl", volumesHelper())
-	write("_ports.tpl", portsHelper())
-	write("_listmap.tpl", listMapHelper())
+	_ = os.WriteFile(path, []byte(strings.TrimSpace(listMapHelper())+"\n"), 0644)
 }
 
-func envHelper() string {
-	return `
-{{- define "chart.env.render" -}}
-{{- $env := .env -}}
-{{- if $env }}
-env:
-{{- range $name := keys $env | sortAlpha }}
-{{- $spec := get $env $name }}
-  - name: {{ $name | quote }}
-{{ toYaml $spec | nindent 4 }}
-{{- end }}
-{{- end }}
-{{- end -}}`
-}
-
-func volumeMountsHelper() string {
-	return `
-{{- define "chart.volumeMounts.render" -}}
-{{- $vm := .volumeMounts -}}
-{{- if $vm }}
-volumeMounts:
-{{- range $name := keys $vm | sortAlpha }}
-{{- $spec := get $vm $name }}
-  - name: {{ $name | quote }}
-{{ toYaml $spec | nindent 4 }}
-{{- end }}
-{{- end }}
-{{- end -}}`
-}
-
-func volumesHelper() string {
-	return `
-{{- define "chart.volumes.render" -}}
-{{- $vol := .volumes -}}
-{{- if $vol }}
-volumes:
-{{- range $name := keys $vol | sortAlpha }}
-{{- $spec := get $vol $name }}
-  - name: {{ $name | quote }}
-{{ toYaml $spec | nindent 4 }}
-{{- end }}
-{{- end }}
-{{- end -}}`
-}
-
-func portsHelper() string {
-	return `
-{{- define "chart.ports.render" -}}
-{{- $ports := .ports -}}
-{{- if $ports }}
-ports:
-{{- range $name := keys $ports | sortAlpha }}
-{{- $spec := get $ports $name }}
-  - name: {{ $name | default "" | quote }}
-{{ toYaml $spec | nindent 4 }}
-{{- end }}
-{{- end }}
-{{- end -}}`
-}
-
+// listMapHelper returns a single generic helper template that works for any list type
+// Parameters:
+//   - items: the map of items (keyed by merge key value)
+//   - key: the patchMergeKey field name (e.g., "name", "mountPath", "containerPort")
+//   - section: the YAML section name (e.g., "volumes", "volumeMounts", "ports")
 func listMapHelper() string {
 	return `
 {{- define "chart.listmap.render" -}}
 {{- $items := .items -}}
+{{- $key := .key -}}
+{{- $section := .section -}}
 {{- if $items }}
-items:
-{{- range $name := keys $items | sortAlpha }}
-{{- $spec := get $items $name }}
-  - name: {{ $name | quote }}
+{{ $section }}:
+{{- range $keyVal := keys $items | sortAlpha }}
+{{- $spec := get $items $keyVal }}
+  - {{ $key }}: {{ $keyVal | quote }}
+{{- if $spec }}
 {{ toYaml $spec | nindent 4 }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- end -}}`
