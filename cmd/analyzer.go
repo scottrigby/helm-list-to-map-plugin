@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 
 	admissionv1 "k8s.io/api/admission/v1"
@@ -269,6 +270,30 @@ type DetectedCandidate struct {
 	TemplateFile string // Template file where this was detected (e.g., "deployment.yaml")
 }
 
+// UndetectedUsage represents a .Values list usage that couldn't be auto-detected
+type UndetectedUsage struct {
+	ValuesPath   string // Path in values.yaml
+	TemplateFile string // Template file where this was found
+	LineNumber   int    // Line number in template
+	Reason       string // Why it couldn't be detected
+	Suggestion   string // What the user can do about it
+}
+
+// PartialTemplate represents a template without apiVersion/kind (helper/partial)
+type PartialTemplate struct {
+	FilePath     string   // Relative path to the template file
+	DefinedNames []string // Template names defined via {{- define "..." }}
+	ValuesUsages []string // .Values paths used in this partial
+	IncludedFrom []string // Resource templates that include this partial
+}
+
+// DetectionResult combines all detection outputs
+type DetectionResult struct {
+	Candidates []DetectedCandidate
+	Undetected []UndetectedUsage
+	Partials   []PartialTemplate
+}
+
 // detectConversionCandidates scans templates for convertible fields using K8s API introspection
 // and CRD registry lookup
 func detectConversionCandidates(chartRoot string) ([]DetectedCandidate, error) {
@@ -419,4 +444,302 @@ func getLastPathSegment(path string) string {
 		return path
 	}
 	return parts[len(parts)-1]
+}
+
+// detectConversionCandidatesFull scans templates and returns full detection results including
+// undetected usages and partial templates
+func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) {
+	result := &DetectionResult{}
+	seen := make(map[string]bool)           // dedup candidates by valuesPath
+	seenUndetected := make(map[string]bool) // dedup undetected by valuesPath
+
+	templatesDir := filepath.Join(chartRoot, "templates")
+
+	// First pass: scan for partial templates
+	partials, includeMap := scanPartialTemplates(templatesDir)
+	result.Partials = partials
+
+	// Second pass: scan resource templates
+	err := filepath.WalkDir(templatesDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		if !strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml") {
+			return nil
+		}
+
+		// Parse template file
+		parsed, err := parseTemplateFile(path)
+		if err != nil {
+			return nil // Skip problematic files
+		}
+
+		templateFile := filepath.Base(path)
+
+		// Check if we can resolve this type (either built-in K8s or CRD)
+		hasCRDType := parsed.APIVersion != "" && parsed.Kind != "" &&
+			globalCRDRegistry.HasType(parsed.APIVersion, parsed.Kind)
+
+		// Track which partials are included from this resource template
+		for _, directive := range parsed.Directives {
+			if hasIncludeDirective(directive.Content) {
+				includedNames := extractIncludeNames(directive.Content)
+				for _, name := range includedNames {
+					includeMap[name] = append(includeMap[name], templateFile)
+				}
+			}
+		}
+
+		// If no K8s type resolved and no CRD type available, track undetected usages
+		if parsed.GoType == nil && !hasCRDType {
+			// Still scan for .Values list usages to report as undetected
+			for _, directive := range parsed.Directives {
+				var valuesUsages []ValuesUsage
+				if hasIncludeDirective(directive.Content) {
+					visited := make(map[string]bool)
+					valuesUsages = followIncludeChain(templatesDir, directive.Content, directive.WithContext, visited)
+				} else {
+					valuesUsages = analyzeDirectiveContent(directive.Content, directive.WithContext)
+				}
+
+				for _, usage := range valuesUsages {
+					if !usage.IsListUse || usage.Pattern == "with" {
+						continue
+					}
+					if seenUndetected[usage.ValuesPath] {
+						continue
+					}
+					seenUndetected[usage.ValuesPath] = true
+
+					reason := "Unknown resource type"
+					suggestion := fmt.Sprintf("helm list-to-map add-rule --path='%s[]' --uniqueKey=name", usage.ValuesPath)
+					if parsed.APIVersion != "" && parsed.Kind != "" {
+						reason = fmt.Sprintf("Custom Resource %s/%s without loaded CRD", parsed.APIVersion, parsed.Kind)
+						suggestion = fmt.Sprintf("Load the CRD: helm list-to-map load-crd <crd-file>\n    Or add manual rule: helm list-to-map add-rule --path='%s[]' --uniqueKey=name", usage.ValuesPath)
+					}
+
+					result.Undetected = append(result.Undetected, UndetectedUsage{
+						ValuesPath:   usage.ValuesPath,
+						TemplateFile: templateFile,
+						LineNumber:   directive.LineNumber,
+						Reason:       reason,
+						Suggestion:   suggestion,
+					})
+				}
+			}
+			return nil
+		}
+
+		// Process each directive for convertible fields
+		for _, directive := range parsed.Directives {
+			// Extract what .Values paths are being used
+			var valuesUsages []ValuesUsage
+			if hasIncludeDirective(directive.Content) {
+				visited := make(map[string]bool)
+				valuesUsages = followIncludeChain(templatesDir, directive.Content, directive.WithContext, visited)
+			} else {
+				valuesUsages = analyzeDirectiveContent(directive.Content, directive.WithContext)
+			}
+
+			for _, usage := range valuesUsages {
+				if !usage.IsListUse {
+					continue // Already using map pattern
+				}
+
+				// Skip "with" pattern itself - we only care about actual rendering (toYaml)
+				// The "with" just opens a scope; the "toYaml_dot" inside is what renders data
+				if usage.Pattern == "with" {
+					continue
+				}
+
+				if seen[usage.ValuesPath] {
+					continue
+				}
+
+				// Determine full YAML path where this value is rendered
+				sectionName := getLastPathSegment(usage.ValuesPath)
+				var fullYAMLPath string
+
+				switch usage.Pattern {
+				case "toYaml_dot":
+					// For "toYaml ." inside a "with" block, the directive's YAMLPath
+					// already points to the target K8s field (e.g., spec.template.spec.containers.volumeMounts)
+					fullYAMLPath = directive.YAMLPath
+				default:
+					// For direct "toYaml .Values.X", the directive's YAMLPath usually already
+					// includes the section name (e.g., "spec.groups" for a directive under "groups:")
+					// Only append sectionName if it's not already the last segment
+					if directive.YAMLPath != "" {
+						lastSegment := getLastPathSegment(directive.YAMLPath)
+						if lastSegment == sectionName {
+							// YAML path already ends with the section name
+							fullYAMLPath = directive.YAMLPath
+						} else {
+							// Need to append (e.g., inline directive on same line as key)
+							fullYAMLPath = directive.YAMLPath + "." + sectionName
+						}
+					} else {
+						fullYAMLPath = sectionName
+					}
+				}
+
+				// Check if this path points to a convertible field
+				// Try built-in K8s types first, then CRD registry
+				var fieldInfo *FieldInfo
+				if parsed.GoType != nil {
+					fieldInfo = isConvertibleField(parsed.GoType, fullYAMLPath)
+				}
+				if fieldInfo == nil && hasCRDType {
+					fieldInfo = isConvertibleCRDField(parsed.APIVersion, parsed.Kind, fullYAMLPath)
+				}
+
+				if fieldInfo == nil {
+					// Field exists but is not convertible - might be missing x-kubernetes-list-map-keys
+					if !seenUndetected[usage.ValuesPath] {
+						seenUndetected[usage.ValuesPath] = true
+						reason := "Field is not a strategic merge patch list"
+						suggestion := fmt.Sprintf("helm list-to-map add-rule --path='%s[]' --uniqueKey=name", usage.ValuesPath)
+						if hasCRDType {
+							reason = fmt.Sprintf("CRD field %s lacks x-kubernetes-list-map-keys", fullYAMLPath)
+						}
+						result.Undetected = append(result.Undetected, UndetectedUsage{
+							ValuesPath:   usage.ValuesPath,
+							TemplateFile: templateFile,
+							LineNumber:   directive.LineNumber,
+							Reason:       reason,
+							Suggestion:   suggestion,
+						})
+					}
+					continue
+				}
+
+				seen[usage.ValuesPath] = true
+
+				// Build element type name
+				var elemTypeName string
+				if fieldInfo.ElementType != nil {
+					elemTypeName = formatTypeName(fieldInfo.ElementType)
+				} else {
+					elemTypeName = "map[string]interface{}" // CRD types don't have Go types
+				}
+
+				result.Candidates = append(result.Candidates, DetectedCandidate{
+					ValuesPath:   usage.ValuesPath,
+					YAMLPath:     fullYAMLPath,
+					MergeKey:     fieldInfo.MergeKey,
+					ElementType:  elemTypeName,
+					SectionName:  sectionName,
+					ResourceKind: parsed.Kind,
+					TemplateFile: templateFile,
+				})
+			}
+		}
+
+		return nil
+	})
+
+	// Update partials with their include sources
+	for i := range result.Partials {
+		for _, defName := range result.Partials[i].DefinedNames {
+			if sources, ok := includeMap[defName]; ok {
+				for _, src := range sources {
+					// Avoid duplicates
+					found := false
+					for _, existing := range result.Partials[i].IncludedFrom {
+						if existing == src {
+							found = true
+							break
+						}
+					}
+					if !found {
+						result.Partials[i].IncludedFrom = append(result.Partials[i].IncludedFrom, src)
+					}
+				}
+			}
+		}
+	}
+
+	return result, err
+}
+
+// scanPartialTemplates scans for .tpl files and extracts partial template information
+func scanPartialTemplates(templatesDir string) ([]PartialTemplate, map[string][]string) {
+	var partials []PartialTemplate
+	includeMap := make(map[string][]string) // template name -> files that include it
+
+	_ = filepath.WalkDir(templatesDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		if !strings.HasSuffix(path, ".tpl") {
+			return nil
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		content := string(data)
+
+		// Extract defined template names
+		definedNames := extractDefinedTemplateNames(content)
+		if len(definedNames) == 0 {
+			return nil // Not a partial with defines
+		}
+
+		// Extract .Values usages
+		valuesUsages := extractAllValuesUsages(content)
+
+		relPath, _ := filepath.Rel(templatesDir, path)
+		if relPath == "" {
+			relPath = filepath.Base(path)
+		}
+
+		partials = append(partials, PartialTemplate{
+			FilePath:     "templates/" + relPath,
+			DefinedNames: definedNames,
+			ValuesUsages: valuesUsages,
+		})
+
+		return nil
+	})
+
+	return partials, includeMap
+}
+
+// extractDefinedTemplateNames extracts all template names defined via {{- define "..." }}
+func extractDefinedTemplateNames(content string) []string {
+	var names []string
+	re := regexp.MustCompile(`\{\{-?\s*define\s+"([^"]+)"\s*-?\}\}`)
+	for _, m := range re.FindAllStringSubmatch(content, -1) {
+		names = append(names, m[1])
+	}
+	return names
+}
+
+// extractAllValuesUsages extracts all .Values paths from template content
+func extractAllValuesUsages(content string) []string {
+	seen := make(map[string]bool)
+	var usages []string
+
+	re := regexp.MustCompile(`\.Values\.([a-zA-Z0-9_.]+)`)
+	for _, m := range re.FindAllStringSubmatch(content, -1) {
+		path := m[1]
+		if !seen[path] {
+			seen[path] = true
+			usages = append(usages, path)
+		}
+	}
+
+	return usages
+}
+
+// extractIncludeNames extracts template names from include directives
+func extractIncludeNames(content string) []string {
+	var names []string
+	re := regexp.MustCompile(`include\s+"([^"]+)"`)
+	for _, m := range re.FindAllStringSubmatch(content, -1) {
+		names = append(names, m[1])
+	}
+	return names
 }

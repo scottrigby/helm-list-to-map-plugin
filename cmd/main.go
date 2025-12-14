@@ -113,6 +113,8 @@ func runDetect() {
 	fs := flag.NewFlagSet("detect", flag.ExitOnError)
 	fs.StringVar(&chartDir, "chart", ".", "path to chart root")
 	fs.StringVar(&configPath, "config", "", "path to user config")
+	verbose := false
+	fs.BoolVar(&verbose, "v", false, "verbose output (show template files, partials, and warnings)")
 	fs.Usage = func() {
 		fmt.Print(`
 Scan a Helm chart to detect arrays that can be converted to maps based on
@@ -129,6 +131,7 @@ Flags:
       --chart string    path to chart root (default: current directory)
       --config string   path to user config (default: $HELM_CONFIG_HOME/list-to-map/config.yaml)
   -h, --help            help for detect
+  -v                    verbose output (show template files, partials, and warnings)
 
 Examples:
   # Detect convertible fields in a chart
@@ -137,6 +140,9 @@ Examples:
   # First load CRDs for Custom Resources, then detect
   helm list-to-map load-crd https://raw.githubusercontent.com/.../alertmanager-crd.yaml
   helm list-to-map detect --chart ./my-chart
+
+  # Verbose output to see warnings and partial templates
+  helm list-to-map detect --chart ./my-chart -v
 `)
 	}
 	_ = fs.Parse(os.Args[2:])
@@ -152,7 +158,7 @@ Examples:
 	}
 
 	// Use new programmatic detection via K8s API introspection
-	candidates, err := detectConversionCandidates(root)
+	result, err := detectConversionCandidatesFull(root)
 	if err != nil {
 		fatal(err)
 	}
@@ -162,7 +168,7 @@ Examples:
 
 	// Combine both sources
 	allDetected := make(map[string]DetectedCandidate)
-	for _, c := range candidates {
+	for _, c := range result.Candidates {
 		allDetected[c.ValuesPath] = c
 	}
 	for _, c := range userDetected {
@@ -171,19 +177,118 @@ Examples:
 		}
 	}
 
-	if len(allDetected) == 0 {
-		fmt.Println("No convertible lists detected.")
-		return
+	// Print detected candidates
+	if len(allDetected) > 0 {
+		fmt.Println("Detected convertible arrays:")
+		for _, info := range allDetected {
+			if verbose {
+				fmt.Printf("  %s\n", info.ValuesPath)
+				fmt.Printf("    Key:      %s\n", info.MergeKey)
+				if info.ElementType != "" {
+					fmt.Printf("    Type:     %s\n", info.ElementType)
+				}
+				if info.TemplateFile != "" {
+					fmt.Printf("    Template: %s\n", info.TemplateFile)
+				}
+				if info.ResourceKind != "" {
+					fmt.Printf("    Resource: %s\n", info.ResourceKind)
+				}
+			} else {
+				typeInfo := ""
+				if info.ElementType != "" {
+					typeInfo = fmt.Sprintf(", type=%s", info.ElementType)
+				}
+				fmt.Printf("  %s (key=%s%s)\n", info.ValuesPath, info.MergeKey, typeInfo)
+			}
+		}
 	}
 
-	fmt.Println("Detected convertible arrays:")
-	for _, info := range allDetected {
-		typeInfo := ""
-		if info.ElementType != "" {
-			typeInfo = fmt.Sprintf(", type=%s", info.ElementType)
+	// Print warnings for undetected usages
+	if len(result.Undetected) > 0 {
+		fmt.Println()
+		fmt.Println("Potentially convertible (not auto-detected):")
+		for _, u := range result.Undetected {
+			fmt.Printf("  %s (in %s:%d)\n", u.ValuesPath, u.TemplateFile, u.LineNumber)
+			if verbose {
+				fmt.Printf("    Reason: %s\n", u.Reason)
+				fmt.Printf("    Suggestion: %s\n", u.Suggestion)
+			}
 		}
-		fmt.Printf("· %s → key=%s%s\n", info.ValuesPath, info.MergeKey, typeInfo)
+
+		// Check if any detected candidates have nested list fields that users should know about
+		nestedListWarnings := findNestedListFieldWarnings(result.Candidates)
+		if len(nestedListWarnings) > 0 && verbose {
+			fmt.Println()
+			fmt.Println("Note: Some detected fields render large objects containing nested lists:")
+			for _, w := range nestedListWarnings {
+				fmt.Printf("  %s contains nested list fields: %s\n", w.parentPath, strings.Join(w.nestedFields, ", "))
+			}
+			fmt.Println("  Consider breaking these into separate values for better override granularity.")
+		}
+
+		fmt.Println()
+		if verbose {
+			fmt.Println("To manually add rules for undetected fields, use:")
+			fmt.Println("  helm list-to-map add-rule --path='<path>[]' --uniqueKey=<key>")
+			fmt.Println()
+			fmt.Println("Run 'helm list-to-map add-rule --help' for more options.")
+		} else {
+			fmt.Println("Use -v for details. To add manual rules: helm list-to-map add-rule --help")
+		}
 	}
+
+	// Print partial templates info (verbose only)
+	if verbose && len(result.Partials) > 0 {
+		fmt.Println()
+		fmt.Println("Partial templates:")
+		for _, p := range result.Partials {
+			fmt.Printf("  %s\n", p.FilePath)
+			if len(p.DefinedNames) > 0 {
+				fmt.Printf("    Defines: %s\n", strings.Join(p.DefinedNames, ", "))
+			}
+			if len(p.ValuesUsages) > 0 {
+				fmt.Printf("    Values:  %s\n", strings.Join(p.ValuesUsages, ", "))
+			}
+			if len(p.IncludedFrom) > 0 {
+				fmt.Printf("    Used by: %s\n", strings.Join(p.IncludedFrom, ", "))
+			}
+		}
+	}
+
+	// Summary if nothing found
+	if len(allDetected) == 0 && len(result.Undetected) == 0 {
+		fmt.Println("No convertible lists detected.")
+	}
+}
+
+// nestedListWarning represents a detected field that has nested list fields
+type nestedListWarning struct {
+	parentPath   string
+	nestedFields []string
+}
+
+// findNestedListFieldWarnings checks detected candidates for fields that contain nested lists
+// This helps users understand when they might want to break up large YAML blocks
+func findNestedListFieldWarnings(candidates []DetectedCandidate) []nestedListWarning {
+	var warnings []nestedListWarning
+
+	// Known K8s types that contain nested list fields
+	typesWithNestedLists := map[string][]string{
+		"containers":     {"env", "volumeMounts", "ports"},
+		"initContainers": {"env", "volumeMounts", "ports"},
+	}
+
+	for _, c := range candidates {
+		lastSegment := c.SectionName
+		if nestedFields, ok := typesWithNestedLists[lastSegment]; ok {
+			warnings = append(warnings, nestedListWarning{
+				parentPath:   c.ValuesPath,
+				nestedFields: nestedFields,
+			})
+		}
+	}
+
+	return warnings
 }
 
 // scanForUserRules scans templates using user-defined rules (for CRDs)
@@ -628,7 +733,7 @@ func loadAndStoreCRD(source, crdsDir string) error {
 		if err != nil {
 			return fmt.Errorf("fetching URL: %w", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			return fmt.Errorf("HTTP %d", resp.StatusCode)

@@ -93,7 +93,7 @@ This works because the transformation is structurally identical for all list typ
 
 Custom Resource Definitions (CRDs) are not part of the K8s API packages, but modern CRDs include OpenAPI v3 schemas with list-type annotations. The plugin extracts these to enable automatic detection for Custom Resources.
 
-### How It Works
+### Explicit List Annotations
 
 CRD YAML files contain OpenAPI schemas with Kubernetes-specific extensions:
 
@@ -116,6 +116,51 @@ The plugin parses these annotations to determine:
 
 - **`x-kubernetes-list-type: map`**: Indicates the list has unique keys
 - **`x-kubernetes-list-map-keys`**: Specifies which field(s) form the unique key
+
+### Embedded K8s Type Detection
+
+Many CRDs embed standard Kubernetes types (like `Container`, `Volume`, `VolumeMount`) without explicitly defining `x-kubernetes-list-map-keys`. For example, the Prometheus Operator's `Alertmanager` CRD has a `spec.containers` field that embeds `corev1.Container`, but the CRD schema doesn't include the list annotation.
+
+The plugin detects these embedded types by comparing CRD schema field signatures against actual K8s API types:
+
+```go
+// At init time, build signatures from real K8s types via reflection
+k8sTypeRegistry = []k8sTypeSignature{
+    {TypeName: "Container", MergeKey: "name", FieldNames: extractFieldNames(corev1.Container{})},
+    {TypeName: "Volume", MergeKey: "name", FieldNames: extractFieldNames(corev1.Volume{})},
+    {TypeName: "VolumeMount", MergeKey: "mountPath", FieldNames: extractFieldNames(corev1.VolumeMount{})},
+    // ...
+}
+```
+
+When parsing a CRD array schema, the plugin:
+
+1. Extracts field names from the CRD's `items.properties`
+2. Compares against each K8s type signature
+3. If ≥50% of CRD fields match a K8s type AND the merge key field exists, it's a match
+4. Uses the matched type's merge key for conversion
+
+This approach:
+
+- **Uses real K8s types**: Field names come from `k8s.io/api` via reflection, not hardcoded lists
+- **Handles K8s updates**: When you update the K8s API dependency, field signatures update automatically
+- **Requires merge key mapping**: The merge key for each type must still be specified, as it's defined on the parent struct field (e.g., `PodSpec.Containers`), not on the `Container` type itself
+
+Currently detected embedded types:
+
+| Type                     | Merge Key       | Common Field Names         |
+| ------------------------ | --------------- | -------------------------- |
+| Container                | `name`          | containers, initContainers |
+| Volume                   | `name`          | volumes                    |
+| VolumeMount              | `mountPath`     | volumeMounts               |
+| EnvVar                   | `name`          | env                        |
+| ContainerPort            | `containerPort` | ports                      |
+| Toleration               | `key`           | tolerations                |
+| TopologySpreadConstraint | `topologyKey`   | topologySpreadConstraints  |
+| HostAlias                | `ip`            | hostAliases                |
+| VolumeDevice             | `devicePath`    | volumeDevices              |
+| ResourceClaim            | `name`          | claims                     |
+| LocalObjectReference     | `name`          | imagePullSecrets           |
 
 ### Loading CRDs
 
@@ -150,8 +195,8 @@ User rules are stored in `$HELM_CONFIG_HOME/list-to-map/config.yaml` and supplem
 
 ## File Overview
 
-- `cmd/analyzer.go`: K8s type registry and field schema navigation using reflection
-- `cmd/crd.go`: CRD YAML parsing and registry for Custom Resource support
+- `cmd/analyzer.go`: K8s type registry, field schema navigation using reflection, and detection result types
+- `cmd/crd.go`: CRD YAML parsing, registry for Custom Resource support, and embedded K8s type detection
 - `cmd/parser.go`: Helm template parsing and directive extraction
 - `cmd/main.go`: CLI commands, value migration, and template rewriting
 

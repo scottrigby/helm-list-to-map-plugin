@@ -6,48 +6,47 @@ This document tracks planned enhancements for the list-to-map Helm plugin.
 
 ### Warn about non-detectable templates
 
-**Status:** Not started
+**Status:** ✅ Completed
 
 When `detect` finds `.Values` list usages in templates for unknown resource types (CRDs without loaded definitions), display a warning with actionable suggestions:
 
 ```
-⚠ Potentially convertible (not auto-detected):
-· customApp.listeners (in templates/configmap.yaml:15)
-    Reason: Unknown resource type (Custom Resource without loaded CRD)
-    Suggestion: Load the CRD with 'helm list-to-map load-crd <crd-file>'
-                or add a manual rule with 'helm list-to-map add-rule --path=customApp.listeners[] --uniqueKey=port'
+Potentially convertible (not auto-detected):
+  customApp.listeners (in configmap.yaml:15)
+    Reason: Custom Resource example.com/v1/MyResource without loaded CRD
+    Suggestion: Load the CRD: helm list-to-map load-crd <crd-file>
+    Or add manual rule: helm list-to-map add-rule --path='customApp.listeners[]' --uniqueKey=name
 ```
 
-Implementation:
-
-- Track all `.Values` list usages found during template scanning
-- Compare against successfully detected candidates
-- Report the difference with file/line info and suggested actions
+Use `-v` flag for verbose output with reasons and suggestions.
 
 ### Report partial templates
 
-**Status:** Not started
+**Status:** ✅ Completed
 
 Identify templates without `apiVersion`/`kind` (partials like `_helpers.tpl`, `_containers.tpl`) and report what they contain:
 
 ```
-Partial templates (included in other templates):
-· templates/_containers.tpl
-    Defines: chart.containers, chart.initContainers
-    Contains .Values usages: extraContainers, initContainers
+Partial templates:
+  templates/_helpers.tpl
+    Defines: chart.name, chart.fullname, chart.labels
+    Values:  nameOverride, fullnameOverride, commonLabels
+    Used by: deployment.yaml, service.yaml
 ```
 
-Implementation:
-
-- Detect files with `{{- define "..." }}` but no `apiVersion`/`kind`
-- Extract defined template names and `.Values` usages
-- Note that partials are analyzed via their inclusion context
+Shown with `-v` flag.
 
 ### Improve CRD field coverage warnings
 
-**Status:** Not started
+**Status:** ✅ Completed
 
-When a CRD is loaded but a specific field path doesn't have `x-kubernetes-list-map-keys` defined in its OpenAPI schema, suggest adding a manual rule.
+When a CRD is loaded but a specific field path doesn't have `x-kubernetes-list-map-keys` defined in its OpenAPI schema, the detect command now shows:
+
+```
+  spec.volumes (in alertmanager.yaml:176)
+    Reason: CRD field spec.volumes lacks x-kubernetes-list-map-keys
+    Suggestion: helm list-to-map add-rule --path='spec.volumes[]' --uniqueKey=name
+```
 
 ## Testing Infrastructure
 
@@ -74,6 +73,26 @@ test-update-golden:  # Update golden files
 ```
 
 ## Detection Improvements
+
+### Embedded K8s type detection in CRDs
+
+**Status:** ✅ Completed
+
+CRDs that embed standard K8s types (Container, Volume, VolumeMount, etc.) are now detected automatically by analyzing the OpenAPI schema structure. This detects fields like:
+
+- `spec.containers` (merge key: name)
+- `spec.initContainers` (merge key: name)
+- `spec.volumes` (merge key: name)
+- `spec.volumeMounts` (merge key: mountPath)
+- `spec.tolerations` (merge key: key)
+- `spec.topologySpreadConstraints` (merge key: topologyKey)
+- `spec.hostAliases` (merge key: ip)
+
+### Nested list field warnings
+
+**Status:** ✅ Completed
+
+When detected fields like `containers` or `initContainers` are found, the CLI now shows a warning (in verbose mode) that these contain nested list fields (`env`, `volumeMounts`, `ports`) and suggests breaking them up for better override granularity.
 
 ### Better subchart handling
 
@@ -111,13 +130,13 @@ These are currently skipped. Could potentially:
 
 ### Verbose mode for detect
 
-**Status:** Not started
+**Status:** ✅ Completed
 
 Add `-v` flag to `detect` command showing:
 
-- Which templates were scanned
-- Which resource types were resolved
-- Full YAML paths for each candidate
+- Detailed info for each convertible field (key, type, template, resource)
+- Full reasons and suggestions for undetected fields
+- Partial templates with their defines, values, and inclusion sources
 
 ### JSON/YAML output format
 
