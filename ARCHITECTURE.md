@@ -89,6 +89,88 @@ The helper accepts:
 
 This works because the transformation is structurally identical for all list types: iterate map entries, inject the key field, output as YAML list.
 
+## Template Rewriting Patterns
+
+The `convert` command rewrites existing Helm templates to use the new map-based approach. It supports multiple common template patterns found in real-world charts:
+
+### Pattern 1: Direct toYaml with nindent
+
+```yaml
+# Before
+volumes:
+  {{- toYaml .Values.volumes | nindent 2 }}
+
+# After
+{{- include "chart.listmap.render" (dict "items" .Values.volumes "key" "name" "section" "volumes") }}
+```
+
+### Pattern 2: with block
+
+```yaml
+# Before
+{{- with .Values.volumes }}
+volumes:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+
+# After
+{{- include "chart.listmap.render" (dict "items" .Values.volumes "key" "name" "section" "volumes") }}
+```
+
+### Pattern 3: range loop
+
+```yaml
+# Before
+volumes:
+  {{- range .Values.volumes }}
+  - name: {{ .name }}
+    # ...
+  {{- end }}
+
+# After
+{{- include "chart.listmap.render" (dict "items" .Values.volumes "key" "name" "section" "volumes") }}
+```
+
+### Pattern 4: Conditional with indent
+
+```yaml
+# Before
+{{- if .Values.volumes }}
+  volumes:
+{{ toYaml .Values.volumes | indent 4 }}
+{{- end }}
+
+# After
+{{- include "chart.listmap.render" (dict "items" .Values.volumes "key" "name" "section" "volumes") }}
+```
+
+This pattern is common in charts like kube-prometheus-stack.
+
+### Pattern 5: Conditional with nindent
+
+```yaml
+# Before
+{{- if .Values.volumes }}
+  volumes:
+  {{- toYaml .Values.volumes | nindent 2 }}
+{{- end }}
+
+# After
+{{- include "chart.listmap.render" (dict "items" .Values.volumes "key" "name" "section" "volumes") }}
+```
+
+### Pattern 6: Existing specialized helpers
+
+```yaml
+# Before (from previous plugin versions)
+{{- include "chart.volumes.render" (dict "volumes" (index .Values "volumes")) }}
+
+# After
+{{- include "chart.listmap.render" (dict "items" .Values.volumes "key" "name" "section" "volumes") }}
+```
+
+All patterns are matched using regex with multiline mode, handling variations in whitespace and formatting.
+
 ## CRD Schema Parsing
 
 Custom Resource Definitions (CRDs) are not part of the K8s API packages, but modern CRDs include OpenAPI v3 schemas with list-type annotations. The plugin extracts these to enable automatic detection for Custom Resources.

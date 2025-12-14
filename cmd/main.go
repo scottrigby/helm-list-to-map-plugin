@@ -665,7 +665,7 @@ Usage:
   helm list-to-map load-crd <source> [source...]
 
 Arguments:
-  source    CRD file path or URL (can specify multiple)
+  source    CRD file path, directory, or URL (can specify multiple)
 
 Flags:
   -h, --help   help for load-crd
@@ -677,11 +677,11 @@ Examples:
   # Load CRD from a URL
   helm list-to-map load-crd https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/example/prometheus-operator-crd/monitoring.coreos.com_alertmanagers.yaml
 
-  # Load multiple CRDs
-  helm list-to-map load-crd ./crds/*.yaml
+  # Load all CRDs from a directory (recursively)
+  helm list-to-map load-crd ./my-chart/crds/
 
-  # Load from kube-prometheus-stack CRDs directory
-  helm list-to-map load-crd ./charts/crds/crds/crd-*.yaml
+  # Load multiple CRDs using glob pattern
+  helm list-to-map load-crd ./crds/crd-*.yaml
 `)
 	}
 	_ = fs.Parse(os.Args[2:])
@@ -721,42 +721,50 @@ Examples:
 	}
 }
 
-// loadAndStoreCRD loads a CRD from file or URL and stores it in the config directory
+// loadAndStoreCRD loads a CRD from file, directory, or URL and stores it in the config directory
 func loadAndStoreCRD(source, crdsDir string) error {
-	var data []byte
-	var err error
-	var filename string
-
 	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
 		// Download from URL
-		resp, err := http.Get(source) //nolint:gosec // User-provided URL is intentional
-		if err != nil {
-			return fmt.Errorf("fetching URL: %w", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
+		return loadAndStoreCRDFromURL(source, crdsDir)
+	}
 
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("HTTP %d", resp.StatusCode)
-		}
+	// Check if source is a directory
+	info, err := os.Stat(source)
+	if err != nil {
+		return fmt.Errorf("accessing source: %w", err)
+	}
 
-		data, err = io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("reading response: %w", err)
-		}
+	if info.IsDir() {
+		// Load all CRD files from directory
+		return loadAndStoreCRDsFromDirectory(source, crdsDir)
+	}
 
-		// Extract filename from URL
-		parts := strings.Split(source, "/")
-		filename = parts[len(parts)-1]
-		if filename == "" || !strings.HasSuffix(filename, ".yaml") {
-			filename = "crd-" + fmt.Sprintf("%d", len(source)%10000) + ".yaml"
-		}
-	} else {
-		// Read from file
-		data, err = os.ReadFile(source)
-		if err != nil {
-			return fmt.Errorf("reading file: %w", err)
-		}
-		filename = filepath.Base(source)
+	// Load single file
+	return loadAndStoreCRDFromFile(source, crdsDir)
+}
+
+// loadAndStoreCRDFromURL downloads a CRD from a URL and stores it
+func loadAndStoreCRDFromURL(url, crdsDir string) error {
+	resp, err := http.Get(url) //nolint:gosec // User-provided URL is intentional
+	if err != nil {
+		return fmt.Errorf("fetching URL: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading response: %w", err)
+	}
+
+	// Extract filename from URL
+	parts := strings.Split(url, "/")
+	filename := parts[len(parts)-1]
+	if filename == "" || !strings.HasSuffix(filename, ".yaml") {
+		filename = "crd-" + fmt.Sprintf("%d", len(url)%10000) + ".yaml"
 	}
 
 	// Write to config directory
@@ -765,7 +773,66 @@ func loadAndStoreCRD(source, crdsDir string) error {
 		return fmt.Errorf("writing to config: %w", err)
 	}
 
+	fmt.Printf("Loaded: %s -> %s\n", url, destPath)
+	return nil
+}
+
+// loadAndStoreCRDFromFile loads a CRD from a file and stores it
+func loadAndStoreCRDFromFile(source, crdsDir string) error {
+	data, err := os.ReadFile(source)
+	if err != nil {
+		return fmt.Errorf("reading file: %w", err)
+	}
+
+	filename := filepath.Base(source)
+
+	// Write to config directory
+	destPath := filepath.Join(crdsDir, filename)
+	if err := os.WriteFile(destPath, data, 0644); err != nil {
+		return fmt.Errorf("writing to config: %w", err)
+	}
+
 	fmt.Printf("Loaded: %s -> %s\n", source, destPath)
+	return nil
+}
+
+// loadAndStoreCRDsFromDirectory loads all CRD YAML files from a directory
+func loadAndStoreCRDsFromDirectory(sourceDir, crdsDir string) error {
+	var loaded int
+	err := filepath.WalkDir(sourceDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml") {
+			return nil
+		}
+
+		// Only try to load files that look like CRDs
+		if !strings.Contains(strings.ToLower(filepath.Base(path)), "crd") {
+			return nil
+		}
+
+		if err := loadAndStoreCRDFromFile(path, crdsDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: skipping %s: %v\n", path, err)
+			return nil
+		}
+		loaded++
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	if loaded == 0 {
+		fmt.Fprintf(os.Stderr, "Warning: no CRD files found in %s\n", sourceDir)
+	} else {
+		fmt.Printf("\nLoaded %d CRD file(s) from %s\n", loaded, sourceDir)
+	}
+
 	return nil
 }
 
@@ -1427,25 +1494,39 @@ func rewriteTemplatesWithBackups(chartPath string, paths []PathInfo, backupExten
 //   - mergeKey: the patchMergeKey from K8s API (e.g., "name", "mountPath")
 //   - sectionName: the YAML section name (e.g., "volumes", "volumeMounts")
 func replaceListBlocks(tpl, dotPath, mergeKey, sectionName string) string {
+	// Build the helper call that will replace matched patterns
 	helperCall := fmt.Sprintf(`{{- include "chart.listmap.render" (dict "items" (index .Values %s) "key" %q "section" %q) }}`,
 		quotePath(dotPath), mergeKey, sectionName)
 
+	// Escape dotPath for regex (dots need escaping)
+	escapedDotPath := regexp.QuoteMeta(dotPath)
+
 	// Pattern 1: section:\n  {{- toYaml .Values.X | nindent N }}
-	reA := regexp.MustCompile(`(?ms)` + regexp.QuoteMeta(sectionName) + `:\s*\n\s*\{\{\-?\s*toYaml\s+\.Values\.` + regexp.QuoteMeta(dotPath) + `\s*\|\s*nindent\s*\d+\s*\}\}`)
+	reA := regexp.MustCompile(`(?ms)` + regexp.QuoteMeta(sectionName) + `:\s*\n\s*\{\{\-?\s*toYaml\s+\.Values\.` + escapedDotPath + `\s*\|\s*nindent\s*\d+\s*\}\}`)
 	tpl = reA.ReplaceAllString(tpl, helperCall)
 
 	// Pattern 2: {{- with .Values.X }}\nsection:\n  {{- toYaml . | nindent N }}\n{{- end }}
-	reB := regexp.MustCompile(`(?ms)\{\{-?\s*with\s+\.Values\.` + regexp.QuoteMeta(dotPath) + `\s*\}\}\s*` + regexp.QuoteMeta(sectionName) + `:\s*\n\s*\{\{\-?\s*toYaml\s+\.\s*\|\s*nindent\s*\d+\s*\}\}\s*\{\{-?\s*end\s*\}\}`)
+	reB := regexp.MustCompile(`(?ms)\{\{-?\s*with\s+\.Values\.` + escapedDotPath + `\s*\}\}\s*` + regexp.QuoteMeta(sectionName) + `:\s*\n\s*\{\{\-?\s*toYaml\s+\.\s*\|\s*nindent\s*\d+\s*\}\}\s*\{\{-?\s*end\s*\}\}`)
 	tpl = reB.ReplaceAllString(tpl, helperCall)
 
 	// Pattern 3: section:\n  {{- range .Values.X }}...{{- end }}
-	reC := regexp.MustCompile(`(?ms)` + regexp.QuoteMeta(sectionName) + `:\s*\n\s*\{\{\-?\s*range\s+.*?\.Values\.` + regexp.QuoteMeta(dotPath) + `\s*\}\}.*?\{\{\-?\s*end\s*\}\}`)
+	reC := regexp.MustCompile(`(?ms)` + regexp.QuoteMeta(sectionName) + `:\s*\n\s*\{\{\-?\s*range\s+.*?\.Values\.` + escapedDotPath + `\s*\}\}.*?\{\{\-?\s*end\s*\}\}`)
 	tpl = reC.ReplaceAllString(tpl, helperCall)
 
-	// Pattern 4: {{- include "chart.X.render" (dict "X" ...) }} - existing helper calls
-	// This handles templates that were already converted with specialized helpers
-	reD := regexp.MustCompile(`\{\{-?\s*include\s+"chart\.` + regexp.QuoteMeta(sectionName) + `\.render"\s*\(dict\s+"` + regexp.QuoteMeta(sectionName) + `"\s*\(index\s+\.Values\s+` + regexp.QuoteMeta(quotePath(dotPath)) + `\)\)\s*\}\}`)
+	// Pattern 4: {{- if .Values.X }}\n  section:\n{{ toYaml .Values.X | indent N }}\n{{- end }}
+	// This is a common pattern in many Helm charts (conditional rendering with indent)
+	reD := regexp.MustCompile(`(?ms)\{\{-?\s*if\s+\.Values\.` + escapedDotPath + `\s*\}\}\s*\n\s*` + regexp.QuoteMeta(sectionName) + `:\s*\n\s*\{\{\s*toYaml\s+\.Values\.` + escapedDotPath + `\s*\|\s*indent\s*\d+\s*\}\}\s*\n\{\{-?\s*end\s*\}\}`)
 	tpl = reD.ReplaceAllString(tpl, helperCall)
+
+	// Pattern 5: {{- if .Values.X }}\n  section:\n  {{- toYaml .Values.X | nindent N }}\n{{- end }}
+	// Same as pattern 4 but with nindent
+	reE := regexp.MustCompile(`(?ms)\{\{-?\s*if\s+\.Values\.` + escapedDotPath + `\s*\}\}\s*\n\s*` + regexp.QuoteMeta(sectionName) + `:\s*\n\s*\{\{-?\s*toYaml\s+\.Values\.` + escapedDotPath + `\s*\|\s*nindent\s*\d+\s*\}\}\s*\n\{\{-?\s*end\s*\}\}`)
+	tpl = reE.ReplaceAllString(tpl, helperCall)
+
+	// Pattern 6: {{- include "chart.X.render" (dict "X" ...) }} - existing helper calls
+	// This handles templates that were already converted with specialized helpers
+	reF := regexp.MustCompile(`\{\{-?\s*include\s+"chart\.` + regexp.QuoteMeta(sectionName) + `\.render"\s*\(dict\s+"` + regexp.QuoteMeta(sectionName) + `"\s*\(index\s+\.Values\s+` + regexp.QuoteMeta(quotePath(dotPath)) + `\)\)\s*\}\}`)
+	tpl = reF.ReplaceAllString(tpl, helperCall)
 
 	return tpl
 }

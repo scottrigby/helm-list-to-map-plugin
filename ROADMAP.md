@@ -144,6 +144,38 @@ Add `-v` flag to `detect` command showing:
 
 Add `--output json` or `--output yaml` flags for machine-readable output, useful for CI/CD integration.
 
+## Testing & Validation
+
+### Test against community charts
+
+**Status:** In progress
+
+Test template detection and rewriting patterns against popular community Helm charts to discover real-world template patterns.
+
+**Charts:**
+
+- [x] [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack) - Successfully converted CRD fields (tolerations, containers, volumes, etc.)
+- [ ] [ingress-nginx](https://github.com/kubernetes/ingress-nginx/tree/main/charts/ingress-nginx)
+- [ ] [cert-manager](https://github.com/cert-manager/cert-manager/tree/master/deploy/charts/cert-manager)
+- [ ] [argo-cd](https://github.com/argoproj/argo-helm/tree/main/charts/argo-cd)
+- [ ] [grafana](https://github.com/grafana/helm-charts/tree/main/charts/grafana)
+- [ ] [external-secrets](https://github.com/external-secrets/external-secrets/tree/main/deploy/charts/external-secrets)
+
+**Goals:**
+
+- Identify common template patterns not yet supported
+- Build a pattern catalog with real examples
+- Ensure regex patterns handle whitespace/formatting variations
+- Document edge cases and limitations
+
+**Supported patterns:**
+
+See [Template Rewriting Patterns](ARCHITECTURE.md#template-rewriting-patterns) in ARCHITECTURE.md for the current list of supported patterns. When testing reveals new patterns in community charts:
+
+1. Update `replaceListBlocks()` in `cmd/main.go` with new regex patterns
+2. Add pattern examples to the ARCHITECTURE.md section
+3. Note which chart(s) use the pattern
+
 ## Documentation
 
 ### Add examples directory
