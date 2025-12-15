@@ -80,6 +80,8 @@ func extractAPIVersionAndKind(lines []string) (apiVersion, kind string) {
 
 		if m := reAPIVersion.FindStringSubmatch(line); m != nil {
 			val := strings.TrimSpace(m[1])
+			// Strip quotes if present (some templates use apiVersion: "networking.k8s.io/v1")
+			val = strings.Trim(val, `"'`)
 			// Skip if templated
 			if !strings.Contains(val, "{{") {
 				apiVersion = val
@@ -88,6 +90,8 @@ func extractAPIVersionAndKind(lines []string) (apiVersion, kind string) {
 
 		if m := reKind.FindStringSubmatch(line); m != nil {
 			val := strings.TrimSpace(m[1])
+			// Strip quotes if present
+			val = strings.Trim(val, `"'`)
 			// Skip if templated
 			if !strings.Contains(val, "{{") {
 				kind = val
