@@ -255,6 +255,17 @@ Examples:
 		}
 	}
 
+	// Collect unique Custom Resources without loaded CRDs (always shown, not just verbose)
+	missingCRDs := collectMissingCRDs(result.Undetected)
+	if len(missingCRDs) > 0 {
+		fmt.Println()
+		fmt.Printf("Note: %d Custom Resource type(s) found without loaded CRDs:\n", len(missingCRDs))
+		for _, cr := range missingCRDs {
+			fmt.Printf("  - %s\n", cr)
+		}
+		fmt.Println("Load CRDs for full detection: helm list-to-map load-crd <file-or-directory>")
+	}
+
 	// Summary if nothing found
 	if len(allDetected) == 0 && len(result.Undetected) == 0 {
 		fmt.Println("No convertible lists detected.")
@@ -289,6 +300,37 @@ func findNestedListFieldWarnings(candidates []DetectedCandidate) []nestedListWar
 	}
 
 	return warnings
+}
+
+// collectMissingCRDs extracts unique Custom Resource types that don't have loaded CRDs
+func collectMissingCRDs(undetected []UndetectedUsage) []string {
+	seen := make(map[string]bool)
+	var crds []string
+
+	for _, u := range undetected {
+		// Only include entries that have both APIVersion and Kind (Custom Resources)
+		if u.APIVersion == "" || u.Kind == "" {
+			continue
+		}
+
+		// Skip built-in K8s types (they don't need CRDs)
+		if resolveKubeAPIType(u.APIVersion, u.Kind) != nil {
+			continue
+		}
+
+		// Skip meta-types that are wrappers, not real resources
+		if u.Kind == "List" {
+			continue
+		}
+
+		key := u.APIVersion + "/" + u.Kind
+		if !seen[key] {
+			seen[key] = true
+			crds = append(crds, key)
+		}
+	}
+
+	return crds
 }
 
 // scanForUserRules scans templates using user-defined rules (for CRDs)

@@ -8,114 +8,32 @@ import (
 	"regexp"
 	"strings"
 
-	admissionv1 "k8s.io/api/admission/v1"
-	appsv1 "k8s.io/api/apps/v1"
-	autoscalingv1 "k8s.io/api/autoscaling/v1"
-	autoscalingv2 "k8s.io/api/autoscaling/v2"
-	batchv1 "k8s.io/api/batch/v1"
-	certificatesv1 "k8s.io/api/certificates/v1"
-	coordinationv1 "k8s.io/api/coordination/v1"
-	corev1 "k8s.io/api/core/v1"
-	discoveryv1 "k8s.io/api/discovery/v1"
-	eventsv1 "k8s.io/api/events/v1"
-	networkingv1 "k8s.io/api/networking/v1"
-	nodev1 "k8s.io/api/node/v1"
-	policyv1 "k8s.io/api/policy/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
-	schedulingv1 "k8s.io/api/scheduling/v1"
-	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/client-go/kubernetes/scheme"
 )
 
 // kubeTypeRegistry maps apiVersion/kind to Go reflect.Type
-// This is built from ALL types in k8s.io/api packages
+// This is automatically populated from k8s.io/client-go/kubernetes/scheme
+// which includes ALL built-in Kubernetes types (core, apps, batch, networking, etc.)
 var kubeTypeRegistry map[string]reflect.Type
 
 func init() {
 	kubeTypeRegistry = make(map[string]reflect.Type)
 
-	// Register all K8s types - this is NOT hardcoding field names,
-	// it's registering the mapping from API identifiers to Go types
-	registerTypes := []struct {
-		apiVersion string
-		kind       string
-		typ        interface{}
-	}{
-		// Core v1
-		{"v1", "Pod", corev1.Pod{}},
-		{"v1", "Service", corev1.Service{}},
-		{"v1", "ConfigMap", corev1.ConfigMap{}},
-		{"v1", "Secret", corev1.Secret{}},
-		{"v1", "ServiceAccount", corev1.ServiceAccount{}},
-		{"v1", "PersistentVolume", corev1.PersistentVolume{}},
-		{"v1", "PersistentVolumeClaim", corev1.PersistentVolumeClaim{}},
-		{"v1", "Namespace", corev1.Namespace{}},
-		{"v1", "Node", corev1.Node{}},
-		{"v1", "Endpoints", corev1.Endpoints{}}, //nolint:staticcheck // Deprecated but still widely used
-		{"v1", "LimitRange", corev1.LimitRange{}},
-		{"v1", "ResourceQuota", corev1.ResourceQuota{}},
-		{"v1", "ReplicationController", corev1.ReplicationController{}},
-		{"v1", "Event", corev1.Event{}},
+	// Populate registry from the official Kubernetes scheme
+	// This automatically includes all built-in K8s types across all API versions
+	for gvk, typ := range scheme.Scheme.AllKnownTypes() {
+		// Convert GroupVersionKind to our apiVersion/kind format
+		// Core API (empty group): apiVersion = "v1"
+		// Other APIs: apiVersion = "group/version" (e.g., "apps/v1")
+		var apiVersion string
+		if gvk.Group == "" {
+			apiVersion = gvk.Version
+		} else {
+			apiVersion = gvk.Group + "/" + gvk.Version
+		}
 
-		// Apps v1
-		{"apps/v1", "Deployment", appsv1.Deployment{}},
-		{"apps/v1", "StatefulSet", appsv1.StatefulSet{}},
-		{"apps/v1", "DaemonSet", appsv1.DaemonSet{}},
-		{"apps/v1", "ReplicaSet", appsv1.ReplicaSet{}},
-		{"apps/v1", "ControllerRevision", appsv1.ControllerRevision{}},
-
-		// Batch v1
-		{"batch/v1", "Job", batchv1.Job{}},
-		{"batch/v1", "CronJob", batchv1.CronJob{}},
-
-		// Networking v1
-		{"networking.k8s.io/v1", "Ingress", networkingv1.Ingress{}},
-		{"networking.k8s.io/v1", "IngressClass", networkingv1.IngressClass{}},
-		{"networking.k8s.io/v1", "NetworkPolicy", networkingv1.NetworkPolicy{}},
-
-		// RBAC v1
-		{"rbac.authorization.k8s.io/v1", "Role", rbacv1.Role{}},
-		{"rbac.authorization.k8s.io/v1", "RoleBinding", rbacv1.RoleBinding{}},
-		{"rbac.authorization.k8s.io/v1", "ClusterRole", rbacv1.ClusterRole{}},
-		{"rbac.authorization.k8s.io/v1", "ClusterRoleBinding", rbacv1.ClusterRoleBinding{}},
-
-		// Autoscaling
-		{"autoscaling/v1", "HorizontalPodAutoscaler", autoscalingv1.HorizontalPodAutoscaler{}},
-		{"autoscaling/v2", "HorizontalPodAutoscaler", autoscalingv2.HorizontalPodAutoscaler{}},
-
-		// Storage v1
-		{"storage.k8s.io/v1", "StorageClass", storagev1.StorageClass{}},
-		{"storage.k8s.io/v1", "VolumeAttachment", storagev1.VolumeAttachment{}},
-		{"storage.k8s.io/v1", "CSIDriver", storagev1.CSIDriver{}},
-		{"storage.k8s.io/v1", "CSINode", storagev1.CSINode{}},
-
-		// Policy v1
-		{"policy/v1", "PodDisruptionBudget", policyv1.PodDisruptionBudget{}},
-
-		// Scheduling v1
-		{"scheduling.k8s.io/v1", "PriorityClass", schedulingv1.PriorityClass{}},
-
-		// Coordination v1
-		{"coordination.k8s.io/v1", "Lease", coordinationv1.Lease{}},
-
-		// Discovery v1
-		{"discovery.k8s.io/v1", "EndpointSlice", discoveryv1.EndpointSlice{}},
-
-		// Events v1
-		{"events.k8s.io/v1", "Event", eventsv1.Event{}},
-
-		// Node v1
-		{"node.k8s.io/v1", "RuntimeClass", nodev1.RuntimeClass{}},
-
-		// Certificates v1
-		{"certificates.k8s.io/v1", "CertificateSigningRequest", certificatesv1.CertificateSigningRequest{}},
-
-		// Admission v1
-		{"admission.k8s.io/v1", "AdmissionReview", admissionv1.AdmissionReview{}},
-	}
-
-	for _, rt := range registerTypes {
-		key := rt.apiVersion + "/" + rt.kind
-		kubeTypeRegistry[key] = reflect.TypeOf(rt.typ)
+		key := apiVersion + "/" + gvk.Kind
+		kubeTypeRegistry[key] = typ
 	}
 }
 
@@ -239,24 +157,42 @@ func findFieldByJSONTag(structType reflect.Type, jsonName string) (reflect.Struc
 	return reflect.StructField{}, false
 }
 
-// isConvertibleField checks if a field at the given YAML path is a convertible list
-// A field is convertible if it's a slice with a patchMergeKey defined
-func isConvertibleField(rootType reflect.Type, yamlPath string) *FieldInfo {
+// FieldCheckResult represents the result of checking a field's type
+type FieldCheckResult int
+
+const (
+	FieldNotFound     FieldCheckResult = iota // Field doesn't exist or can't be navigated
+	FieldNotSlice                             // Field exists but is not a slice (map, struct, scalar)
+	FieldSliceNoKey                           // Field is a slice but has no patchMergeKey
+	FieldSliceWithKey                         // Field is a slice with a patchMergeKey (convertible)
+)
+
+// checkFieldType determines the type and convertibility of a field at the given YAML path
+func checkFieldType(rootType reflect.Type, yamlPath string) (FieldCheckResult, *FieldInfo) {
 	info, err := navigateFieldSchema(rootType, yamlPath)
 	if err != nil {
-		return nil
+		return FieldNotFound, nil
 	}
 
 	if !info.IsSlice {
-		return nil
+		return FieldNotSlice, info
 	}
 
-	// The field must have a patchMergeKey to be convertible
 	if info.MergeKey == "" {
-		return nil
+		return FieldSliceNoKey, info
 	}
 
-	return info
+	return FieldSliceWithKey, info
+}
+
+// isConvertibleField checks if a field at the given YAML path is a convertible list
+// A field is convertible if it's a slice with a patchMergeKey defined
+func isConvertibleField(rootType reflect.Type, yamlPath string) *FieldInfo {
+	result, info := checkFieldType(rootType, yamlPath)
+	if result == FieldSliceWithKey {
+		return info
+	}
+	return nil
 }
 
 // DetectedCandidate represents a field detected for conversion
@@ -277,6 +213,8 @@ type UndetectedUsage struct {
 	LineNumber   int    // Line number in template
 	Reason       string // Why it couldn't be detected
 	Suggestion   string // What the user can do about it
+	APIVersion   string // API version of the resource (if known)
+	Kind         string // Kind of the resource (if known)
 }
 
 // PartialTemplate represents a template without apiVersion/kind (helper/partial)
@@ -351,32 +289,16 @@ func detectConversionCandidates(chartRoot string) ([]DetectedCandidate, error) {
 					continue
 				}
 
-				// Determine full YAML path where this value is rendered
-				sectionName := getLastPathSegment(usage.ValuesPath)
-				var fullYAMLPath string
-
-				switch usage.Pattern {
-				case "toYaml_dot":
-					// For "toYaml ." inside a "with" block, the directive's YAMLPath
-					// already points to the target K8s field (e.g., spec.template.spec.containers.volumeMounts)
-					fullYAMLPath = directive.YAMLPath
-				default:
-					// For direct "toYaml .Values.X", the directive's YAMLPath usually already
-					// includes the section name (e.g., "spec.groups" for a directive under "groups:")
-					// Only append sectionName if it's not already the last segment
-					if directive.YAMLPath != "" {
-						lastSegment := getLastPathSegment(directive.YAMLPath)
-						if lastSegment == sectionName {
-							// YAML path already ends with the section name
-							fullYAMLPath = directive.YAMLPath
-						} else {
-							// Need to append (e.g., inline directive on same line as key)
-							fullYAMLPath = directive.YAMLPath + "." + sectionName
-						}
-					} else {
-						fullYAMLPath = sectionName
-					}
+				// The directive's YAMLPath tells us exactly where in the K8s structure
+				// this value is rendered (e.g., "spec.template.spec.securityContext").
+				// The values key name (e.g., "podSecurityContext") is irrelevant for
+				// schema lookup - we use the actual K8s YAML path.
+				fullYAMLPath := directive.YAMLPath
+				if fullYAMLPath == "" {
+					// Rare case: directive at root level with no parent keys
+					continue
 				}
+				sectionName := getLastPathSegment(usage.ValuesPath)
 
 				// Check if this path points to a convertible field
 				// Try built-in K8s types first, then CRD registry
@@ -524,6 +446,8 @@ func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) 
 						LineNumber:   directive.LineNumber,
 						Reason:       reason,
 						Suggestion:   suggestion,
+						APIVersion:   parsed.APIVersion,
+						Kind:         parsed.Kind,
 					})
 				}
 			}
@@ -556,51 +480,50 @@ func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) 
 					continue
 				}
 
-				// Determine full YAML path where this value is rendered
-				sectionName := getLastPathSegment(usage.ValuesPath)
-				var fullYAMLPath string
-
-				switch usage.Pattern {
-				case "toYaml_dot":
-					// For "toYaml ." inside a "with" block, the directive's YAMLPath
-					// already points to the target K8s field (e.g., spec.template.spec.containers.volumeMounts)
-					fullYAMLPath = directive.YAMLPath
-				default:
-					// For direct "toYaml .Values.X", the directive's YAMLPath usually already
-					// includes the section name (e.g., "spec.groups" for a directive under "groups:")
-					// Only append sectionName if it's not already the last segment
-					if directive.YAMLPath != "" {
-						lastSegment := getLastPathSegment(directive.YAMLPath)
-						if lastSegment == sectionName {
-							// YAML path already ends with the section name
-							fullYAMLPath = directive.YAMLPath
-						} else {
-							// Need to append (e.g., inline directive on same line as key)
-							fullYAMLPath = directive.YAMLPath + "." + sectionName
-						}
-					} else {
-						fullYAMLPath = sectionName
-					}
+				// The directive's YAMLPath tells us exactly where in the K8s structure
+				// this value is rendered (e.g., "spec.template.spec.securityContext").
+				// The values key name (e.g., "podSecurityContext") is irrelevant for
+				// schema lookup - we use the actual K8s YAML path.
+				fullYAMLPath := directive.YAMLPath
+				if fullYAMLPath == "" {
+					// Rare case: directive at root level with no parent keys
+					continue
 				}
+				sectionName := getLastPathSegment(usage.ValuesPath)
 
 				// Check if this path points to a convertible field
 				// Try built-in K8s types first, then CRD registry
 				var fieldInfo *FieldInfo
+				fieldCheck := FieldNotFound
 				if parsed.GoType != nil {
-					fieldInfo = isConvertibleField(parsed.GoType, fullYAMLPath)
+					fieldCheck, fieldInfo = checkFieldType(parsed.GoType, fullYAMLPath)
 				}
+				// If it's not a slice in the K8s type, skip it entirely - it's not a list field
+				// (e.g., resources, affinity, nodeSelector are structs/maps, not lists)
+				if fieldCheck == FieldNotSlice {
+					continue
+				}
+				// For slices without merge key, try CRD registry as fallback
 				if fieldInfo == nil && hasCRDType {
 					fieldInfo = isConvertibleCRDField(parsed.APIVersion, parsed.Kind, fullYAMLPath)
 				}
 
 				if fieldInfo == nil {
-					// Field exists but is not convertible - might be missing x-kubernetes-list-map-keys
+					// Field is either:
+					// 1. A slice without patchMergeKey (fieldCheck == FieldSliceNoKey)
+					// 2. Not found in K8s types but might be in CRD (fieldCheck == FieldNotFound)
 					if !seenUndetected[usage.ValuesPath] {
 						seenUndetected[usage.ValuesPath] = true
-						reason := "Field is not a strategic merge patch list"
-						suggestion := fmt.Sprintf("helm list-to-map add-rule --path='%s[]' --uniqueKey=name", usage.ValuesPath)
-						if hasCRDType {
+						var reason, suggestion string
+						if fieldCheck == FieldSliceNoKey {
+							reason = fmt.Sprintf("Slice field %s has no patchMergeKey", fullYAMLPath)
+							suggestion = fmt.Sprintf("helm list-to-map add-rule --path='%s[]' --uniqueKey=name", usage.ValuesPath)
+						} else if hasCRDType {
 							reason = fmt.Sprintf("CRD field %s lacks x-kubernetes-list-map-keys", fullYAMLPath)
+							suggestion = fmt.Sprintf("Load the CRD: helm list-to-map load-crd <crd-file>\n    Or add manual rule: helm list-to-map add-rule --path='%s[]' --uniqueKey=name", usage.ValuesPath)
+						} else {
+							reason = "Field not found in K8s type schema"
+							suggestion = fmt.Sprintf("helm list-to-map add-rule --path='%s[]' --uniqueKey=name", usage.ValuesPath)
 						}
 						result.Undetected = append(result.Undetected, UndetectedUsage{
 							ValuesPath:   usage.ValuesPath,
@@ -608,6 +531,8 @@ func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) 
 							LineNumber:   directive.LineNumber,
 							Reason:       reason,
 							Suggestion:   suggestion,
+							APIVersion:   parsed.APIVersion,
+							Kind:         parsed.Kind,
 						})
 					}
 					continue
