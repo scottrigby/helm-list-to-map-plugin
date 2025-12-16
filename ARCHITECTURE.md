@@ -73,6 +73,25 @@ The detection flow:
 5. Check if field is a slice with a `patchMergeKey` tag
 6. If yes, the field is convertible using that key
 
+### Template-Only Candidates
+
+Detection may find template patterns that reference arrays not defined in `values.yaml`. For example, a template may have:
+
+```yaml
+{{- with .Values.imagePullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+```
+
+Even if the referenced field (e.g., `imagePullSecrets`) is commented out or missing from `values.yaml`, this is still a valid conversion candidate. The plugin:
+
+1. **Detect**: Reports these separately as "Template patterns without values.yaml entries"
+2. **Convert**: Still updates the template to use map-style syntax, making it "map-ready" for when users override this field
+3. **User guidance**: Reminds users to update any comments or documentation describing the field format
+
+This behavior ensures charts are fully prepared for map-based overrides even for optional fields.
+
 ## Single Generic Helper
 
 All converted fields use the same helper template regardless of K8s type:

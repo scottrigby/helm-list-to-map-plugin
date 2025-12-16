@@ -117,6 +117,9 @@ Features:
 - Parses `Chart.yaml` to find `file://` dependencies
 - Converts subcharts at their source location
 - Automatically updates umbrella `values.yaml` to match
+- Supports template-only conversion (updates templates even when values.yaml has no entry)
+
+**Planned Enhancement:** Global values support - When processing subcharts, check if fields like `imagePullSecrets` exist in umbrella's `global.*` values (which Helm merges into subcharts). This would allow detect to recognize that `imagePullSecrets` could come from `global.imagePullSecrets` in the parent chart.
 
 #### Phase 2: `--include-charts-dir` flag (Planned)
 

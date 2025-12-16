@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 
+	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/client-go/kubernetes/scheme"
 )
@@ -240,13 +241,14 @@ func isConvertibleField(rootType reflect.Type, yamlPath string) *FieldInfo {
 
 // DetectedCandidate represents a field detected for conversion
 type DetectedCandidate struct {
-	ValuesPath   string // Path in values.yaml (e.g., "volumes")
-	YAMLPath     string // Path in K8s resource (e.g., "spec.template.spec.volumes")
-	MergeKey     string // The patchMergeKey field (e.g., "name", "mountPath")
-	ElementType  string // Go type name (e.g., "corev1.Volume")
-	SectionName  string // The YAML section name (e.g., "volumes")
-	ResourceKind string // K8s resource kind (e.g., "Deployment", "StatefulSet")
-	TemplateFile string // Template file where this was detected (e.g., "deployment.yaml")
+	ValuesPath     string // Path in values.yaml (e.g., "volumes")
+	YAMLPath       string // Path in K8s resource (e.g., "spec.template.spec.volumes")
+	MergeKey       string // The patchMergeKey field (e.g., "name", "mountPath")
+	ElementType    string // Go type name (e.g., "corev1.Volume")
+	SectionName    string // The YAML section name (e.g., "volumes")
+	ResourceKind   string // K8s resource kind (e.g., "Deployment", "StatefulSet")
+	TemplateFile   string // Template file where this was detected (e.g., "deployment.yaml")
+	ExistsInValues bool   // Whether the path exists in values.yaml (false = template-only pattern)
 }
 
 // UndetectedCategory represents why a field couldn't be auto-detected
@@ -753,4 +755,73 @@ func extractIncludeNames(content string) []string {
 		names = append(names, m[1])
 	}
 	return names
+}
+
+// valuesPathExists checks if a dot-notation path exists in values.yaml
+// Returns (exists, isArray, error)
+func valuesPathExists(chartRoot, dotPath string) (bool, bool, error) {
+	valuesPath := filepath.Join(chartRoot, "values.yaml")
+	data, err := os.ReadFile(valuesPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return false, false, err
+	}
+
+	parts := strings.Split(dotPath, ".")
+	node := findYAMLNodeAtPath(&doc, parts)
+	if node == nil {
+		return false, false, nil
+	}
+
+	return true, node.Kind == yaml.SequenceNode, nil
+}
+
+// findYAMLNodeAtPath traverses a YAML document to find the node at the given path
+func findYAMLNodeAtPath(node *yaml.Node, path []string) *yaml.Node {
+	if node == nil || len(path) == 0 {
+		return node
+	}
+
+	switch node.Kind {
+	case yaml.DocumentNode:
+		if len(node.Content) > 0 {
+			return findYAMLNodeAtPath(node.Content[0], path)
+		}
+		return nil
+
+	case yaml.MappingNode:
+		key := path[0]
+		for i := 0; i < len(node.Content); i += 2 {
+			if node.Content[i].Value == key {
+				return findYAMLNodeAtPath(node.Content[i+1], path[1:])
+			}
+		}
+		return nil
+
+	default:
+		return nil
+	}
+}
+
+// checkCandidatesInValues updates candidates with ExistsInValues based on values.yaml
+func checkCandidatesInValues(chartRoot string, candidates []DetectedCandidate) []DetectedCandidate {
+	result := make([]DetectedCandidate, len(candidates))
+	for i, c := range candidates {
+		exists, _, err := valuesPathExists(chartRoot, c.ValuesPath)
+		if err != nil {
+			// On error, assume exists (conservative)
+			c.ExistsInValues = true
+		} else {
+			c.ExistsInValues = exists
+		}
+		result[i] = c
+	}
+	return result
 }

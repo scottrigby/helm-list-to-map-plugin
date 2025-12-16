@@ -92,6 +92,32 @@ make build
 helm plugin install .
 ```
 
+## Limitations
+
+### Environment Variable Ordering
+
+**Important**: Map-based values are rendered in **alphabetical order** (sorted by key). This affects environment variables that reference other env vars using Kubernetes' `$(VAR_NAME)` syntax.
+
+In Kubernetes, environment variables are processed in order, and `$(VAR_NAME)` references are resolved using previously-defined variables. After conversion, env vars are sorted alphabetically, which may break references if the referenced variable comes later in the alphabet.
+
+**Example that will break:**
+
+```yaml
+# After conversion, these are sorted alphabetically
+env:
+  API_URL: # "A" comes before "B" - processed first
+    value: "$(BASE_URL)/api" # ERROR: BASE_URL not defined yet!
+  BASE_URL: # "B" comes after "A" - processed second
+    value: "https://example.com"
+```
+
+**Solutions:**
+
+1. **Avoid cross-references**: Don't use `$(VAR)` syntax to reference other env vars
+2. **Keep as arrays**: Don't convert env vars that have ordering dependencies
+
+**Safe field types**: `volumes`, `volumeMounts`, `ports`, `containers`, and most other list fields don't have ordering dependencies and are safe to convert
+
 ## Usage
 
 ### `helm list-to-map`
@@ -116,6 +142,20 @@ Available Commands:
 Flags:
   -h, --help   help for list-to-map
 
+IMPORTANT - Ordering Limitation:
+  Map-based values are rendered in alphabetical order (sorted by key).
+  For environment variables, this means $(VAR) references to other env vars
+  may not work if the referenced var comes later alphabetically.
+
+  Example that will BREAK after conversion:
+    env:
+      API_URL:           # "A" comes before "B"
+        value: "$(BASE_URL)/api"  # References BASE_URL
+      BASE_URL:          # Defined AFTER API_URL alphabetically
+        value: "https://example.com"
+
+  Ensure your env vars don't rely on definition order, or keep them as arrays.
+
 Use "helm list-to-map [command] --help" for more information about a command.
 ```
 
@@ -138,6 +178,8 @@ Flags:
       --chart string    path to chart root (default: current directory)
       --config string   path to user config (default: $HELM_CONFIG_HOME/list-to-map/config.yaml)
   -h, --help            help for detect
+      --recursive       recursively detect in file:// subcharts (for umbrella charts)
+  -v                    verbose output (show template files, partials, and warnings)
 
 Examples:
   # Detect convertible fields in a chart
@@ -146,6 +188,12 @@ Examples:
   # First load CRDs for Custom Resources, then detect
   helm list-to-map load-crd https://raw.githubusercontent.com/.../alertmanager-crd.yaml
   helm list-to-map detect --chart ./my-chart
+
+  # Verbose output to see warnings and partial templates
+  helm list-to-map detect --chart ./my-chart -v
+
+  # Detect in umbrella chart and all file:// subcharts
+  helm list-to-map detect --chart ./umbrella-chart --recursive
 ```
 
 ### `helm list-to-map convert`
@@ -176,6 +224,7 @@ Flags:
       --config string       path to user config (default: $HELM_CONFIG_HOME/list-to-map/config.yaml)
       --dry-run             preview changes without writing files
   -h, --help                help for convert
+      --recursive           recursively convert file:// subcharts and update umbrella values
 
 Examples:
   # Convert a chart with built-in K8s types
@@ -187,6 +236,9 @@ Examples:
 
   # Preview changes without modifying files
   helm list-to-map convert --dry-run
+
+  # Convert umbrella chart and all file:// subcharts recursively
+  helm list-to-map convert --chart ./umbrella-chart --recursive
 ```
 
 ### `helm list-to-map load-crd`
@@ -201,14 +253,21 @@ and automatically loaded when running 'detect' or 'convert'.
 The plugin extracts x-kubernetes-list-type and x-kubernetes-list-map-keys
 annotations from the CRD's OpenAPI schema to identify convertible list fields.
 
+CRD files are named using the pattern {group}_{plural}_{storageVersion}.yaml,
+so different storage versions of the same CRD coexist without overwriting.
+Existing files are preserved unless --force is used.
+
 Usage:
-  helm list-to-map load-crd <source> [source...]
+  helm list-to-map load-crd [flags] <source> [source...]
+  helm list-to-map load-crd --common
 
 Arguments:
-  source    CRD file path or URL (can specify multiple)
+  source    CRD file path, directory, or URL (can specify multiple)
 
 Flags:
-  -h, --help   help for load-crd
+      --common  load CRDs from bundled crd-sources.yaml (uses 'main' branch)
+      --force   overwrite existing CRD files with same storage version
+  -h, --help    help for load-crd
 
 Examples:
   # Load CRD from a local file
@@ -217,8 +276,14 @@ Examples:
   # Load CRD from a URL
   helm list-to-map load-crd https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/example/prometheus-operator-crd/monitoring.coreos.com_alertmanagers.yaml
 
-  # Load multiple CRDs
-  helm list-to-map load-crd ./crds/*.yaml
+  # Load all CRDs from a directory (recursively)
+  helm list-to-map load-crd ./my-chart/crds/
+
+  # Load bundled common CRDs (from crd-sources.yaml)
+  helm list-to-map load-crd --common
+
+  # Force overwrite existing CRDs
+  helm list-to-map load-crd --force ./crds/
 ```
 
 ### `helm list-to-map list-crds`
@@ -278,29 +343,3 @@ Usage:
 Flags:
   -h, --help   help for rules
 ```
-
-## Limitations
-
-### Environment Variable Ordering
-
-**Important**: Map-based values are rendered in **alphabetical order** (sorted by key). This affects environment variables that reference other env vars using Kubernetes' `$(VAR_NAME)` syntax.
-
-In Kubernetes, environment variables are processed in order, and `$(VAR_NAME)` references are resolved using previously-defined variables. After conversion, env vars are sorted alphabetically, which may break references if the referenced variable comes later in the alphabet.
-
-**Example that will break:**
-
-```yaml
-# After conversion, these are sorted alphabetically
-env:
-  API_URL: # "A" comes before "B" - processed first
-    value: "$(BASE_URL)/api" # ERROR: BASE_URL not defined yet!
-  BASE_URL: # "B" comes after "A" - processed second
-    value: "https://example.com"
-```
-
-**Solutions:**
-
-1. **Avoid cross-references**: Don't use `$(VAR)` syntax to reference other env vars
-2. **Keep as arrays**: Don't convert env vars that have ordering dependencies
-
-**Safe field types**: `volumes`, `volumeMounts`, `ports`, `containers`, and most other list fields don't have ordering dependencies and are safe to convert

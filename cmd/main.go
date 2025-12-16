@@ -222,10 +222,27 @@ Examples:
 		}
 	}
 
-	// Print detected candidates
-	if len(allDetected) > 0 {
+	// Check values.yaml existence for each candidate
+	var allCandidates []DetectedCandidate
+	for _, c := range allDetected {
+		allCandidates = append(allCandidates, c)
+	}
+	allCandidates = checkCandidatesInValues(root, allCandidates)
+
+	// Separate candidates with values vs template-only
+	var withValues, templateOnly []DetectedCandidate
+	for _, c := range allCandidates {
+		if c.ExistsInValues {
+			withValues = append(withValues, c)
+		} else {
+			templateOnly = append(templateOnly, c)
+		}
+	}
+
+	// Print candidates with values (will be fully converted)
+	if len(withValues) > 0 {
 		fmt.Println("Detected convertible arrays:")
-		for _, info := range allDetected {
+		for _, info := range withValues {
 			if verbose {
 				fmt.Printf("  %s\n", info.ValuesPath)
 				fmt.Printf("    Key:      %s\n", info.MergeKey)
@@ -244,6 +261,25 @@ Examples:
 					typeInfo = fmt.Sprintf(", type=%s", info.ElementType)
 				}
 				fmt.Printf("  %s (key=%s%s)\n", info.ValuesPath, info.MergeKey, typeInfo)
+			}
+		}
+	}
+
+	// Print template-only candidates (no values.yaml entry)
+	if len(templateOnly) > 0 {
+		fmt.Println()
+		fmt.Println("Template patterns without values.yaml entries:")
+		fmt.Println("  These templates reference arrays that don't exist in values.yaml.")
+		fmt.Println("  Convert will still update templates (making them map-ready).")
+		fmt.Println()
+		for _, info := range templateOnly {
+			typeInfo := ""
+			if info.ElementType != "" {
+				typeInfo = fmt.Sprintf(", type=%s", info.ElementType)
+			}
+			fmt.Printf("  %s (key=%s%s)\n", info.ValuesPath, info.MergeKey, typeInfo)
+			if verbose && info.TemplateFile != "" {
+				fmt.Printf("    Template: %s\n", info.TemplateFile)
 			}
 		}
 	}
@@ -717,6 +753,29 @@ Examples:
 		}
 	}
 
+	// Check values.yaml existence for candidates with matching templates
+	var candidateList []DetectedCandidate
+	for _, c := range candidateMap {
+		candidateList = append(candidateList, c)
+	}
+	candidateList = checkCandidatesInValues(root, candidateList)
+
+	// Separate by values existence
+	var withValuesCandidates, templateOnlyCandidates []DetectedCandidate
+	for _, c := range candidateList {
+		if c.ExistsInValues {
+			withValuesCandidates = append(withValuesCandidates, c)
+		} else {
+			templateOnlyCandidates = append(templateOnlyCandidates, c)
+		}
+	}
+
+	// Rebuild candidateMap with only candidates that have values
+	candidateMap = make(map[string]DetectedCandidate)
+	for _, c := range withValuesCandidates {
+		candidateMap[c.ValuesPath] = c
+	}
+
 	// Warn about paths that couldn't be converted
 	if len(skippedPaths) > 0 {
 		fmt.Println("\nSkipped (template pattern not supported):")
@@ -815,6 +874,22 @@ Examples:
 		fmt.Println("No changes needed in values.yaml.")
 	}
 
+	// Add template-only candidates to transformedPaths for template rewriting
+	if len(templateOnlyCandidates) > 0 {
+		fmt.Println("\nTemplate-only conversions (no values.yaml entry):")
+		for _, c := range templateOnlyCandidates {
+			fmt.Printf("  %s (key=%s)\n", c.ValuesPath, c.MergeKey)
+			transformedPaths = append(transformedPaths, PathInfo{
+				DotPath:     c.ValuesPath,
+				MergeKey:    c.MergeKey,
+				SectionName: c.SectionName,
+			})
+		}
+		fmt.Println("\n  NOTE: These templates will be updated to use map-style syntax.")
+		fmt.Println("  Please manually update any comments in values.yaml or documentation")
+		fmt.Println("  that describe these fields to use map format instead of list format.")
+	}
+
 	var tchanges []string
 	var helperCreated bool
 	if !dryRun {
@@ -856,7 +931,7 @@ Examples:
 		}
 	}
 
-	if len(edits) == 0 && len(tchanges) == 0 && !dryRun {
+	if len(edits) == 0 && len(tchanges) == 0 && len(templateOnlyCandidates) == 0 && !dryRun {
 		fmt.Println("Nothing to convert.")
 	}
 }
@@ -1705,9 +1780,22 @@ func runRecursiveDetect(umbrellaRoot string, verbose bool) {
 			continue
 		}
 
-		if len(detected) > 0 {
-			fmt.Printf("  Convertible (%d):\n", len(detected))
-			for _, c := range detected {
+		// Check values.yaml existence for detected candidates
+		detected = checkCandidatesInValues(subchartPath, detected)
+
+		// Separate by values existence
+		var withValues, templateOnly []DetectedCandidate
+		for _, c := range detected {
+			if c.ExistsInValues {
+				withValues = append(withValues, c)
+			} else {
+				templateOnly = append(templateOnly, c)
+			}
+		}
+
+		if len(withValues) > 0 {
+			fmt.Printf("  Convertible - has values (%d):\n", len(withValues))
+			for _, c := range withValues {
 				if verbose {
 					fmt.Printf("    %s\n", c.ValuesPath)
 					fmt.Printf("      Key:  %s\n", c.MergeKey)
@@ -1718,7 +1806,15 @@ func runRecursiveDetect(umbrellaRoot string, verbose bool) {
 					fmt.Printf("    - %s (key=%s)\n", c.ValuesPath, c.MergeKey)
 				}
 			}
-			totalDetected += len(detected)
+			totalDetected += len(withValues)
+		}
+
+		if len(templateOnly) > 0 {
+			fmt.Printf("  Convertible - template only (%d):\n", len(templateOnly))
+			for _, c := range templateOnly {
+				fmt.Printf("    - %s (key=%s) [no value in values.yaml]\n", c.ValuesPath, c.MergeKey)
+			}
+			totalDetected += len(templateOnly)
 		}
 
 		if len(skipped) > 0 {
