@@ -1,0 +1,56 @@
+# Common CRD Source Registry
+# Popular Kubernetes CRDs bundled with list-to-map for convenience
+# Used by: helm list-to-map load-crd --common
+#
+# Format:
+#   apiGroup:
+#     description: Brief description
+#     repo: GitHub org/repo
+#     default_version: Version to use (branch name or release tag)
+#     url or all_in_one: Direct download URL (use {version} placeholder)
+
+# Prometheus Operator - widely used for Kubernetes monitoring
+monitoring.coreos.com:
+  description: Prometheus Operator CRDs (Prometheus, Alertmanager, ServiceMonitor, etc.)
+  repo: prometheus-operator/prometheus-operator
+  default_version: main
+  all_in_one: https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/{version}/bundle.yaml
+  doc: https://doc.crds.dev/github.com/prometheus-operator/prometheus-operator
+
+# Contour - popular ingress controller
+projectcontour.io:
+  description: Contour Ingress Controller CRDs (HTTPProxy, TLSCertificateDelegation)
+  repo: projectcontour/contour
+  default_version: main
+  url: https://raw.githubusercontent.com/projectcontour/contour/{version}/examples/contour/01-crds.yaml
+  doc: https://doc.crds.dev/github.com/projectcontour/contour
+
+# cert-manager - standard for TLS certificate management
+cert-manager.io:
+  description: cert-manager TLS Certificate CRDs (Issuer, ClusterIssuer, Certificate)
+  repo: cert-manager/cert-manager
+  default_version: v1.16.3
+  url: https://github.com/cert-manager/cert-manager/releases/download/{version}/cert-manager.crds.yaml
+  doc: https://doc.crds.dev/github.com/cert-manager/cert-manager
+
+# Vertical Pod Autoscaler - standard K8s autoscaling
+autoscaling.k8s.io:
+  description: Vertical Pod Autoscaler CRDs
+  repo: kubernetes/autoscaler
+  default_version: "1.5.1"
+  url: https://raw.githubusercontent.com/kubernetes/autoscaler/vertical-pod-autoscaler-{version}/vertical-pod-autoscaler/deploy/vpa-v1-crd-gen.yaml
+
+# Secrets Store CSI Driver - popular secrets management
+secrets-store.csi.x-k8s.io:
+  description: Secrets Store CSI Driver CRDs (SecretProviderClass)
+  repo: kubernetes-sigs/secrets-store-csi-driver
+  default_version: main
+  url: https://raw.githubusercontent.com/kubernetes-sigs/secrets-store-csi-driver/{version}/config/crd/bases/secrets-store.csi.x-k8s.io_secretproviderclasses.yaml
+
+# Dapr - distributed application runtime
+dapr.io:
+  description: Dapr Runtime CRDs (Component, Configuration, Subscription, etc.)
+  repo: dapr/dapr
+  default_version: master
+  url: https://raw.githubusercontent.com/dapr/dapr/{version}/charts/dapr/crds/components.yaml
+  doc: https://doc.crds.dev/github.com/dapr/dapr

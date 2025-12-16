@@ -206,15 +206,30 @@ type DetectedCandidate struct {
 	TemplateFile string // Template file where this was detected (e.g., "deployment.yaml")
 }
 
+// UndetectedCategory represents why a field couldn't be auto-detected
+type UndetectedCategory string
+
+const (
+	// CategoryCRDNoKeys - CRD loaded, field is confirmed array, but lacks x-kubernetes-list-map-keys
+	CategoryCRDNoKeys UndetectedCategory = "crd_no_keys"
+	// CategoryK8sNoKeys - K8s type, field is confirmed slice, but lacks patchMergeKey
+	CategoryK8sNoKeys UndetectedCategory = "k8s_no_keys"
+	// CategoryMissingCRD - Custom Resource but CRD not loaded
+	CategoryMissingCRD UndetectedCategory = "missing_crd"
+	// CategoryUnknownType - No type information available (can't determine if array)
+	CategoryUnknownType UndetectedCategory = "unknown_type"
+)
+
 // UndetectedUsage represents a .Values list usage that couldn't be auto-detected
 type UndetectedUsage struct {
-	ValuesPath   string // Path in values.yaml
-	TemplateFile string // Template file where this was found
-	LineNumber   int    // Line number in template
-	Reason       string // Why it couldn't be detected
-	Suggestion   string // What the user can do about it
-	APIVersion   string // API version of the resource (if known)
-	Kind         string // Kind of the resource (if known)
+	ValuesPath   string             // Path in values.yaml
+	TemplateFile string             // Template file where this was found
+	LineNumber   int                // Line number in template
+	Reason       string             // Why it couldn't be detected
+	Suggestion   string             // What the user can do about it
+	APIVersion   string             // API version of the resource (if known)
+	Kind         string             // Kind of the resource (if known)
+	Category     UndetectedCategory // Why detection failed
 }
 
 // PartialTemplate represents a template without apiVersion/kind (helper/partial)
@@ -433,11 +448,16 @@ func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) 
 					}
 					seenUndetected[usage.ValuesPath] = true
 
-					reason := "Unknown resource type"
-					suggestion := fmt.Sprintf("helm list-to-map add-rule --path='%s[]' --uniqueKey=name", usage.ValuesPath)
+					var reason, suggestion string
+					var category UndetectedCategory
 					if parsed.APIVersion != "" && parsed.Kind != "" {
 						reason = fmt.Sprintf("Custom Resource %s/%s without loaded CRD", parsed.APIVersion, parsed.Kind)
-						suggestion = fmt.Sprintf("Load the CRD: helm list-to-map load-crd <crd-file>\n    Or add manual rule: helm list-to-map add-rule --path='%s[]' --uniqueKey=name", usage.ValuesPath)
+						suggestion = fmt.Sprintf("helm list-to-map add-rule --path='%s[]' --uniqueKey=name", usage.ValuesPath)
+						category = CategoryMissingCRD
+					} else {
+						reason = "Unknown resource type"
+						suggestion = fmt.Sprintf("helm list-to-map add-rule --path='%s[]' --uniqueKey=name", usage.ValuesPath)
+						category = CategoryUnknownType
 					}
 
 					result.Undetected = append(result.Undetected, UndetectedUsage{
@@ -448,6 +468,7 @@ func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) 
 						Suggestion:   suggestion,
 						APIVersion:   parsed.APIVersion,
 						Kind:         parsed.Kind,
+						Category:     category,
 					})
 				}
 			}
@@ -512,18 +533,34 @@ func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) 
 					// Field is either:
 					// 1. A slice without patchMergeKey (fieldCheck == FieldSliceNoKey)
 					// 2. Not found in K8s types but might be in CRD (fieldCheck == FieldNotFound)
+
+					// For CRD types, only report as "potentially convertible" if the field is actually
+					// an array in the CRD schema. toYaml is used for maps, objects, AND arrays - we
+					// shouldn't suggest conversion for non-array fields.
+					if hasCRDType && fieldCheck != FieldSliceNoKey {
+						isArray := isCRDArrayField(parsed.APIVersion, parsed.Kind, fullYAMLPath)
+						if !isArray {
+							// Not an array in CRD schema - skip (it's a map/object being rendered)
+							continue
+						}
+					}
+
 					if !seenUndetected[usage.ValuesPath] {
 						seenUndetected[usage.ValuesPath] = true
 						var reason, suggestion string
+						var category UndetectedCategory
 						if fieldCheck == FieldSliceNoKey {
 							reason = fmt.Sprintf("Slice field %s has no patchMergeKey", fullYAMLPath)
 							suggestion = fmt.Sprintf("helm list-to-map add-rule --path='%s[]' --uniqueKey=name", usage.ValuesPath)
+							category = CategoryK8sNoKeys
 						} else if hasCRDType {
-							reason = fmt.Sprintf("CRD field %s lacks x-kubernetes-list-map-keys", fullYAMLPath)
-							suggestion = fmt.Sprintf("Load the CRD: helm list-to-map load-crd <crd-file>\n    Or add manual rule: helm list-to-map add-rule --path='%s[]' --uniqueKey=name", usage.ValuesPath)
+							reason = fmt.Sprintf("Array field %s lacks x-kubernetes-list-map-keys", fullYAMLPath)
+							suggestion = fmt.Sprintf("helm list-to-map add-rule --path='%s[]' --uniqueKey=name", usage.ValuesPath)
+							category = CategoryCRDNoKeys
 						} else {
 							reason = "Field not found in K8s type schema"
 							suggestion = fmt.Sprintf("helm list-to-map add-rule --path='%s[]' --uniqueKey=name", usage.ValuesPath)
+							category = CategoryUnknownType
 						}
 						result.Undetected = append(result.Undetected, UndetectedUsage{
 							ValuesPath:   usage.ValuesPath,
@@ -533,6 +570,7 @@ func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) 
 							Suggestion:   suggestion,
 							APIVersion:   parsed.APIVersion,
 							Kind:         parsed.Kind,
+							Category:     category,
 						})
 					}
 					continue

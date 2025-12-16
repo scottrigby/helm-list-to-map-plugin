@@ -125,12 +125,19 @@ func extractFieldNames(t reflect.Type) map[string]bool {
 type CRDRegistry struct {
 	// Map of "apiVersion/kind" to list of convertible fields
 	fields map[string][]CRDFieldInfo
+	// Map of "group/kind" to list of available versions (e.g., ["v1", "v1alpha1"])
+	versions map[string][]string
+	// Map of "apiVersion/kind" to set of ALL array field paths (even without map keys)
+	// Used to filter non-array fields from "potentially convertible" list
+	arrayFields map[string]map[string]bool
 }
 
 // NewCRDRegistry creates a new empty CRD registry
 func NewCRDRegistry() *CRDRegistry {
 	return &CRDRegistry{
-		fields: make(map[string][]CRDFieldInfo),
+		fields:      make(map[string][]CRDFieldInfo),
+		versions:    make(map[string][]string),
+		arrayFields: make(map[string]map[string]bool),
 	}
 }
 
@@ -141,15 +148,97 @@ type crdDocument struct {
 	Spec       struct {
 		Group string `yaml:"group"`
 		Names struct {
-			Kind string `yaml:"kind"`
+			Kind   string `yaml:"kind"`
+			Plural string `yaml:"plural"`
 		} `yaml:"names"`
 		Versions []struct {
-			Name   string `yaml:"name"`
-			Schema struct {
+			Name    string `yaml:"name"`
+			Storage bool   `yaml:"storage"`
+			Schema  struct {
 				OpenAPIV3Schema yaml.Node `yaml:"openAPIV3Schema"`
 			} `yaml:"schema"`
 		} `yaml:"versions"`
 	} `yaml:"spec"`
+}
+
+// CRDMetadata contains metadata extracted from a CRD file
+type CRDMetadata struct {
+	Group          string
+	Plural         string
+	Kind           string
+	Versions       []string
+	StorageVersion string // The version marked as storage: true
+}
+
+// ExtractCRDMetadata extracts metadata from CRD data (first CRD in multi-doc)
+func ExtractCRDMetadata(data []byte) (*CRDMetadata, error) {
+	decoder := yaml.NewDecoder(strings.NewReader(string(data)))
+
+	for {
+		var doc crdDocument
+		err := decoder.Decode(&doc)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("parsing YAML: %w", err)
+		}
+
+		// Only process CRD documents
+		if doc.Kind != "CustomResourceDefinition" {
+			continue
+		}
+
+		// Extract metadata
+		meta := &CRDMetadata{
+			Group:  doc.Spec.Group,
+			Plural: doc.Spec.Names.Plural,
+			Kind:   doc.Spec.Names.Kind,
+		}
+
+		// Extract versions and find storage version
+		for _, v := range doc.Spec.Versions {
+			if v.Name != "" {
+				meta.Versions = append(meta.Versions, v.Name)
+				if v.Storage {
+					meta.StorageVersion = v.Name
+				}
+			}
+		}
+
+		// Fallback: if no storage version found, use first version
+		if meta.StorageVersion == "" && len(meta.Versions) > 0 {
+			meta.StorageVersion = meta.Versions[0]
+		}
+
+		if meta.Group == "" || meta.Plural == "" {
+			continue
+		}
+
+		return meta, nil
+	}
+
+	return nil, fmt.Errorf("no valid CRD found in data")
+}
+
+// ExtractCanonicalFilename extracts the canonical filename from CRD data
+// Returns the filename in format {group}_{plural}_{storageVersion}.yaml
+func ExtractCanonicalFilename(data []byte) (string, error) {
+	meta, err := ExtractCRDMetadata(data)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s_%s_%s.yaml", meta.Group, meta.Plural, meta.StorageVersion), nil
+}
+
+// CRDFileExists checks if a CRD file already exists at the given path
+// With storage version in filename, each unique storage version has its own file
+// Returns (exists, reason) where reason explains why to skip if file exists
+func CRDFileExists(path string) (bool, string) {
+	if _, err := os.Stat(path); err == nil {
+		return true, "file already exists (use --force to overwrite)"
+	}
+	return false, ""
 }
 
 // LoadFromFile loads CRD definitions from a file (supports multi-document YAML)
@@ -222,15 +311,28 @@ func (r *CRDRegistry) loadFromBytes(data []byte, source string) error {
 			continue
 		}
 
+		// Track versions for this group+kind
+		group := doc.Spec.Group
+		kind := doc.Spec.Names.Kind
+		groupKindKey := group + "/" + kind
+
 		// Process each version in the CRD
 		for _, version := range doc.Spec.Versions {
-			apiVersion := doc.Spec.Group + "/" + version.Name
-			kind := doc.Spec.Names.Kind
+			apiVersion := group + "/" + version.Name
 			key := apiVersion + "/" + kind
+
+			// Track this version for the group+kind
+			r.versions[groupKindKey] = appendUnique(r.versions[groupKindKey], version.Name)
 
 			// Extract list fields from the schema
 			var fields []CRDFieldInfo
-			findCRDListFields(&version.Schema.OpenAPIV3Schema, "", apiVersion, kind, &fields)
+			allArrays := make(map[string]bool)
+			findCRDListFields(&version.Schema.OpenAPIV3Schema, "", apiVersion, kind, &fields, allArrays)
+
+			// Store ALL array field paths for this type (for filtering non-arrays)
+			if len(allArrays) > 0 {
+				r.arrayFields[key] = allArrays
+			}
 
 			// Store fields that have map-type lists
 			for _, f := range fields {
@@ -245,7 +347,7 @@ func (r *CRDRegistry) loadFromBytes(data []byte, source string) error {
 }
 
 // findCRDListFields recursively extracts list field info from OpenAPI schema
-func findCRDListFields(node *yaml.Node, path, apiVersion, kind string, fields *[]CRDFieldInfo) {
+func findCRDListFields(node *yaml.Node, path, apiVersion, kind string, fields *[]CRDFieldInfo, allArrays map[string]bool) {
 	if node == nil || node.Kind != yaml.MappingNode {
 		return
 	}
@@ -282,6 +384,11 @@ func findCRDListFields(node *yaml.Node, path, apiVersion, kind string, fields *[
 		case "properties":
 			propertiesNode = val
 		}
+	}
+
+	// Track ALL array fields (even without map keys) for filtering
+	if isArray && path != "" {
+		allArrays[path] = true
 	}
 
 	// Record this field if it's a map-type list with explicit keys
@@ -321,13 +428,13 @@ func findCRDListFields(node *yaml.Node, path, apiVersion, kind string, fields *[
 			if path != "" {
 				newPath = path + "." + propName
 			}
-			findCRDListFields(propVal, newPath, apiVersion, kind, fields)
+			findCRDListFields(propVal, newPath, apiVersion, kind, fields, allArrays)
 		}
 	}
 
 	// Recurse into items (for arrays of objects)
 	if itemsNode != nil {
-		findCRDListFields(itemsNode, path, apiVersion, kind, fields)
+		findCRDListFields(itemsNode, path, apiVersion, kind, fields, allArrays)
 	}
 }
 
@@ -427,6 +534,59 @@ func (r *CRDRegistry) HasType(apiVersion, kind string) bool {
 	return ok
 }
 
+// HasGroupKind checks if the registry has any version of a given group+kind
+func (r *CRDRegistry) HasGroupKind(group, kind string) bool {
+	key := group + "/" + kind
+	_, ok := r.versions[key]
+	return ok
+}
+
+// IsArrayField checks if a field path is an array in the CRD schema
+// Returns true if the field is known to be an array, false otherwise
+// This is used to filter out non-array fields from "potentially convertible" lists
+func (r *CRDRegistry) IsArrayField(apiVersion, kind, yamlPath string) bool {
+	key := apiVersion + "/" + kind
+	arrays, ok := r.arrayFields[key]
+	if !ok {
+		return false
+	}
+	return arrays[yamlPath]
+}
+
+// GetAvailableVersions returns the available versions for a group+kind
+// Returns nil if the group+kind is not registered
+func (r *CRDRegistry) GetAvailableVersions(group, kind string) []string {
+	key := group + "/" + kind
+	return r.versions[key]
+}
+
+// CheckVersionMismatch checks if a specific version is available for a group+kind
+// Returns (hasGroupKind, hasSpecificVersion, availableVersions)
+func (r *CRDRegistry) CheckVersionMismatch(apiVersion, kind string) (bool, bool, []string) {
+	// Parse group from apiVersion (e.g., "monitoring.coreos.com/v1" -> "monitoring.coreos.com")
+	parts := strings.Split(apiVersion, "/")
+	if len(parts) != 2 {
+		return false, false, nil
+	}
+	group := parts[0]
+	version := parts[1]
+
+	groupKindKey := group + "/" + kind
+	availableVersions, hasGroupKind := r.versions[groupKindKey]
+	if !hasGroupKind {
+		return false, false, nil
+	}
+
+	// Check if the specific version is available
+	for _, v := range availableVersions {
+		if v == version {
+			return true, true, availableVersions
+		}
+	}
+
+	return true, false, availableVersions
+}
+
 // ListTypes returns all registered API types
 func (r *CRDRegistry) ListTypes() []string {
 	types := make([]string, 0, len(r.fields))
@@ -434,6 +594,16 @@ func (r *CRDRegistry) ListTypes() []string {
 		types = append(types, k)
 	}
 	return types
+}
+
+// appendUnique appends a value to a slice only if not already present
+func appendUnique(slice []string, value string) []string {
+	for _, v := range slice {
+		if v == value {
+			return slice
+		}
+	}
+	return append(slice, value)
 }
 
 // ListFields returns all convertible fields for a given API type
@@ -451,6 +621,49 @@ func (f *CRDFieldInfo) ToFieldInfo() *FieldInfo {
 		IsSlice:     true,
 		MergeKey:    f.MapKeys[0], // Use first key (most CRDs have single key)
 	}
+}
+
+// CRDSourceEntry represents a CRD source from crd-sources.yaml
+type CRDSourceEntry struct {
+	Description    string `yaml:"description"`
+	Repo           string `yaml:"repo"`
+	DefaultVersion string `yaml:"default_version"`
+	CRDsPath       string `yaml:"crds_path"`
+	URL            string `yaml:"url"`
+	URLPattern     string `yaml:"url_pattern"`
+	AllInOne       string `yaml:"all_in_one"`
+	Note           string `yaml:"note"`
+}
+
+// LoadCRDSources loads and parses the crd-sources.yaml file
+func LoadCRDSources(path string) (map[string]CRDSourceEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading CRD sources file: %w", err)
+	}
+
+	var sources map[string]CRDSourceEntry
+	if err := yaml.Unmarshal(data, &sources); err != nil {
+		return nil, fmt.Errorf("parsing CRD sources: %w", err)
+	}
+
+	return sources, nil
+}
+
+// GetDownloadURL returns the best URL for downloading CRDs for a source
+// Prefers all_in_one, then url. Returns empty string if no direct URL available.
+// The version parameter replaces {version} placeholder in URLs.
+func (e *CRDSourceEntry) GetDownloadURL(version string) string {
+	// Prefer all_in_one (contains all CRDs in one file)
+	if e.AllInOne != "" {
+		return strings.ReplaceAll(e.AllInOne, "{version}", version)
+	}
+	// Fall back to url (single file or bundle)
+	if e.URL != "" {
+		return strings.ReplaceAll(e.URL, "{version}", version)
+	}
+	// url_pattern requires knowing specific kinds, skip
+	return ""
 }
 
 // Global CRD registry instance
@@ -487,4 +700,10 @@ func isConvertibleCRDField(apiVersion, kind, yamlPath string) *FieldInfo {
 		return nil
 	}
 	return info.ToFieldInfo()
+}
+
+// isCRDArrayField checks if a field is an array in the CRD schema
+// Returns true if the field is known to be an array, false if not or unknown
+func isCRDArrayField(apiVersion, kind, yamlPath string) bool {
+	return globalCRDRegistry.IsArrayField(apiVersion, kind, yamlPath)
 }

@@ -203,15 +203,63 @@ Examples:
 		}
 	}
 
-	// Print warnings for undetected usages
+	// Print warnings for undetected usages, grouped by category
 	if len(result.Undetected) > 0 {
-		fmt.Println()
-		fmt.Println("Potentially convertible (not auto-detected):")
-		for _, u := range result.Undetected {
-			fmt.Printf("  %s (in %s:%d)\n", u.ValuesPath, u.TemplateFile, u.LineNumber)
-			if verbose {
-				fmt.Printf("    Reason: %s\n", u.Reason)
-				fmt.Printf("    Suggestion: %s\n", u.Suggestion)
+		// Group by category
+		crdNoKeys := filterByCategory(result.Undetected, CategoryCRDNoKeys)
+		k8sNoKeys := filterByCategory(result.Undetected, CategoryK8sNoKeys)
+		missingCRD := filterByCategory(result.Undetected, CategoryMissingCRD)
+		unknownType := filterByCategory(result.Undetected, CategoryUnknownType)
+
+		// Arrays with known type but no merge keys (CRD or K8s)
+		knownArrays := append(crdNoKeys, k8sNoKeys...)
+		if len(knownArrays) > 0 {
+			fmt.Println()
+			fmt.Println("Arrays without auto-detected unique keys:")
+			fmt.Println("  These are confirmed array fields, but lack merge key annotations.")
+			fmt.Println("  Add rules if you want to convert them to maps:")
+			fmt.Println()
+			for _, u := range knownArrays {
+				fmt.Printf("  %s (in %s:%d)\n", u.ValuesPath, u.TemplateFile, u.LineNumber)
+				if verbose {
+					fmt.Printf("    %s\n", u.Reason)
+					addRuleCmd := fmt.Sprintf("helm list-to-map add-rule --path='%s[]' --uniqueKey=name", u.ValuesPath)
+					fmt.Printf("    Add rule: %s\n", addRuleCmd)
+				}
+			}
+			if !verbose {
+				fmt.Println()
+				fmt.Println("  Use -v for suggested add-rule commands.")
+			}
+		}
+
+		// Missing CRDs - we don't know the type
+		if len(missingCRD) > 0 {
+			fmt.Println()
+			fmt.Println("Fields in Custom Resources without loaded CRDs:")
+			fmt.Println("  Load the CRD to determine if these are arrays:")
+			fmt.Println()
+			for _, u := range missingCRD {
+				fmt.Printf("  %s (in %s:%d)\n", u.ValuesPath, u.TemplateFile, u.LineNumber)
+				if verbose {
+					fmt.Printf("    Resource: %s/%s\n", u.APIVersion, u.Kind)
+				}
+			}
+		}
+
+		// Unknown type - no API info at all
+		if len(unknownType) > 0 {
+			fmt.Println()
+			fmt.Println("Fields with unknown type (may or may not be arrays):")
+			fmt.Println("  These use toYaml but the resource type couldn't be determined.")
+			fmt.Println("  Review manually and add rules for actual arrays:")
+			fmt.Println()
+			for _, u := range unknownType {
+				fmt.Printf("  %s (in %s:%d)\n", u.ValuesPath, u.TemplateFile, u.LineNumber)
+				if verbose {
+					addRuleCmd := fmt.Sprintf("helm list-to-map add-rule --path='%s[]' --uniqueKey=name", u.ValuesPath)
+					fmt.Printf("    Add rule: %s\n", addRuleCmd)
+				}
 			}
 		}
 
@@ -226,14 +274,9 @@ Examples:
 			fmt.Println("  Consider breaking these into separate values for better override granularity.")
 		}
 
-		fmt.Println()
-		if verbose {
-			fmt.Println("To manually add rules for undetected fields, use:")
-			fmt.Println("  helm list-to-map add-rule --path='<path>[]' --uniqueKey=<key>")
+		if verbose && (len(knownArrays) > 0 || len(unknownType) > 0) {
 			fmt.Println()
-			fmt.Println("Run 'helm list-to-map add-rule --help' for more options.")
-		} else {
-			fmt.Println("Use -v for details. To add manual rules: helm list-to-map add-rule --help")
+			fmt.Println("Tip: Replace 'name' with the actual unique key field for each array.")
 		}
 	}
 
@@ -256,14 +299,53 @@ Examples:
 	}
 
 	// Collect unique Custom Resources without loaded CRDs (always shown, not just verbose)
-	missingCRDs := collectMissingCRDs(result.Undetected)
+	missingCRDs, versionMismatches := collectMissingCRDs(result.Undetected)
+
+	// Show version mismatches first (user has CRD but wrong version)
+	if len(versionMismatches) > 0 {
+		fmt.Println()
+		fmt.Printf("Warning: %d Custom Resource type(s) using version not in loaded CRD:\n", len(versionMismatches))
+		for _, vm := range versionMismatches {
+			fmt.Printf("  - %s (loaded versions: %s)\n", vm.APIVersionKind, strings.Join(vm.AvailableVersions, ", "))
+		}
+		fmt.Println("Download CRD with matching version or update templates to use available version.")
+	}
+
+	// Show completely missing CRDs with smart suggestions
 	if len(missingCRDs) > 0 {
+		// Check which missing CRDs are available in common-crds.yaml
+		commonGroups := getCommonCRDGroups()
+		var inCommon, notInCommon []string
+		for _, cr := range missingCRDs {
+			group := extractAPIGroup(cr)
+			if commonGroups[group] {
+				inCommon = append(inCommon, cr)
+			} else {
+				notInCommon = append(notInCommon, cr)
+			}
+		}
+
 		fmt.Println()
 		fmt.Printf("Note: %d Custom Resource type(s) found without loaded CRDs:\n", len(missingCRDs))
-		for _, cr := range missingCRDs {
-			fmt.Printf("  - %s\n", cr)
+
+		if len(inCommon) > 0 {
+			fmt.Println("  Available via --common:")
+			for _, cr := range inCommon {
+				fmt.Printf("    - %s\n", cr)
+			}
+			fmt.Println("  Run: helm list-to-map load-crd --common")
 		}
-		fmt.Println("Load CRDs for full detection: helm list-to-map load-crd <file-or-directory>")
+
+		if len(notInCommon) > 0 {
+			if len(inCommon) > 0 {
+				fmt.Println()
+				fmt.Println("  Requires manual download:")
+			}
+			for _, cr := range notInCommon {
+				fmt.Printf("    - %s\n", cr)
+			}
+			fmt.Println("  Load with: helm list-to-map load-crd <url-or-file>")
+		}
 	}
 
 	// Summary if nothing found
@@ -302,10 +384,64 @@ func findNestedListFieldWarnings(candidates []DetectedCandidate) []nestedListWar
 	return warnings
 }
 
+// CRDStatus represents the status of a CRD for a given apiVersion/kind
+type CRDStatus struct {
+	APIVersionKind    string   // e.g., "monitoring.coreos.com/v1/Alertmanager"
+	IsMissing         bool     // CRD not loaded at all
+	IsVersionMismatch bool     // CRD loaded but different version
+	AvailableVersions []string // Versions available in loaded CRD (if any)
+}
+
+// filterByCategory returns undetected usages matching the given category
+func filterByCategory(undetected []UndetectedUsage, category UndetectedCategory) []UndetectedUsage {
+	var result []UndetectedUsage
+	for _, u := range undetected {
+		if u.Category == category {
+			result = append(result, u)
+		}
+	}
+	return result
+}
+
+// getCommonCRDGroups returns a set of API groups available in common-crds.yaml
+func getCommonCRDGroups() map[string]bool {
+	groups := make(map[string]bool)
+
+	// Try to load common-crds.yaml from plugin directory
+	pluginDir := os.Getenv("HELM_PLUGIN_DIR")
+	if pluginDir == "" {
+		// Fallback: try current directory (for development)
+		pluginDir = "."
+	}
+
+	sourcesFile := filepath.Join(pluginDir, "common-crds.yaml")
+	sources, err := LoadCRDSources(sourcesFile)
+	if err != nil {
+		// If we can't load common-crds.yaml, return empty set
+		return groups
+	}
+
+	for group := range sources {
+		groups[group] = true
+	}
+	return groups
+}
+
+// extractAPIGroup extracts the API group from an apiVersion/kind string
+// e.g., "monitoring.coreos.com/v1/ServiceMonitor" -> "monitoring.coreos.com"
+func extractAPIGroup(apiVersionKind string) string {
+	parts := strings.Split(apiVersionKind, "/")
+	if len(parts) >= 1 {
+		return parts[0]
+	}
+	return ""
+}
+
 // collectMissingCRDs extracts unique Custom Resource types that don't have loaded CRDs
-func collectMissingCRDs(undetected []UndetectedUsage) []string {
-	seen := make(map[string]bool)
-	var crds []string
+// Also detects version mismatches (CRD loaded but wrong version)
+func collectMissingCRDs(undetected []UndetectedUsage) (missing []string, versionMismatches []CRDStatus) {
+	seenMissing := make(map[string]bool)
+	seenMismatch := make(map[string]bool)
 
 	for _, u := range undetected {
 		// Only include entries that have both APIVersion and Kind (Custom Resources)
@@ -324,13 +460,29 @@ func collectMissingCRDs(undetected []UndetectedUsage) []string {
 		}
 
 		key := u.APIVersion + "/" + u.Kind
-		if !seen[key] {
-			seen[key] = true
-			crds = append(crds, key)
+
+		// Check if this is a version mismatch (CRD loaded but different version)
+		hasGroupKind, hasVersion, availableVersions := globalCRDRegistry.CheckVersionMismatch(u.APIVersion, u.Kind)
+		if hasGroupKind && !hasVersion {
+			// CRD exists but with different version
+			if !seenMismatch[key] {
+				seenMismatch[key] = true
+				versionMismatches = append(versionMismatches, CRDStatus{
+					APIVersionKind:    key,
+					IsVersionMismatch: true,
+					AvailableVersions: availableVersions,
+				})
+			}
+		} else if !hasGroupKind {
+			// CRD not loaded at all
+			if !seenMissing[key] {
+				seenMissing[key] = true
+				missing = append(missing, key)
+			}
 		}
 	}
 
-	return crds
+	return missing, versionMismatches
 }
 
 // scanForUserRules scans templates using user-defined rules (for CRDs)
@@ -692,8 +844,14 @@ Flags:
 	}
 }
 
+// Global flag for force overwrite (set by runLoadCRD)
+var forceOverwrite bool
+
 func runLoadCRD() {
 	fs := flag.NewFlagSet("load-crd", flag.ExitOnError)
+	fs.BoolVar(&forceOverwrite, "force", false, "overwrite existing CRD files")
+	loadCommon := false
+	fs.BoolVar(&loadCommon, "common", false, "load CRDs from bundled crd-sources.yaml")
 	fs.Usage = func() {
 		fmt.Print(`
 Load CRD (Custom Resource Definition) files to enable detection of convertible
@@ -703,14 +861,21 @@ and automatically loaded when running 'detect' or 'convert'.
 The plugin extracts x-kubernetes-list-type and x-kubernetes-list-map-keys
 annotations from the CRD's OpenAPI schema to identify convertible list fields.
 
+CRD files are named using the pattern {group}_{plural}_{storageVersion}.yaml,
+so different storage versions of the same CRD coexist without overwriting.
+Existing files are preserved unless --force is used.
+
 Usage:
-  helm list-to-map load-crd <source> [source...]
+  helm list-to-map load-crd [flags] <source> [source...]
+  helm list-to-map load-crd --common
 
 Arguments:
   source    CRD file path, directory, or URL (can specify multiple)
 
 Flags:
-  -h, --help   help for load-crd
+      --common  load CRDs from bundled crd-sources.yaml (uses 'main' branch)
+      --force   overwrite existing CRD files with same storage version
+  -h, --help    help for load-crd
 
 Examples:
   # Load CRD from a local file
@@ -722,14 +887,23 @@ Examples:
   # Load all CRDs from a directory (recursively)
   helm list-to-map load-crd ./my-chart/crds/
 
-  # Load multiple CRDs using glob pattern
-  helm list-to-map load-crd ./crds/crd-*.yaml
+  # Load bundled common CRDs (from crd-sources.yaml)
+  helm list-to-map load-crd --common
+
+  # Force overwrite existing CRDs
+  helm list-to-map load-crd --force ./crds/
 `)
 	}
 	_ = fs.Parse(os.Args[2:])
 
+	// Handle --common flag
+	if loadCommon {
+		loadCommonCRDs()
+		return
+	}
+
 	if fs.NArg() == 0 {
-		fmt.Fprintln(os.Stderr, "Error: at least one CRD source is required")
+		fmt.Fprintln(os.Stderr, "Error: at least one CRD source is required (or use --common)")
 		fmt.Fprintln(os.Stderr, "Run 'helm list-to-map load-crd --help' for usage.")
 		os.Exit(1)
 	}
@@ -760,6 +934,84 @@ Examples:
 			fields := globalCRDRegistry.fields[t]
 			fmt.Printf("  %s (%d convertible fields)\n", t, len(fields))
 		}
+	}
+}
+
+// loadCommonCRDs loads CRDs from the bundled common-crds.yaml file
+func loadCommonCRDs() {
+	// Find common-crds.yaml in plugin directory
+	pluginDir := os.Getenv("HELM_PLUGIN_DIR")
+	if pluginDir == "" {
+		// Fallback: check current directory and parent
+		candidates := []string{"common-crds.yaml", "../common-crds.yaml"}
+		for _, c := range candidates {
+			if _, err := os.Stat(c); err == nil {
+				pluginDir = filepath.Dir(c)
+				break
+			}
+		}
+	}
+
+	sourcesFile := filepath.Join(pluginDir, "common-crds.yaml")
+	if _, err := os.Stat(sourcesFile); err != nil {
+		// Try current directory as fallback
+		sourcesFile = "common-crds.yaml"
+	}
+
+	sources, err := LoadCRDSources(sourcesFile)
+	if err != nil {
+		fatal(fmt.Errorf("loading common-crds.yaml: %w", err))
+	}
+
+	// Ensure CRD config directory exists
+	crdsDir := crdConfigDir()
+	if err := os.MkdirAll(crdsDir, 0755); err != nil {
+		fatal(fmt.Errorf("creating CRD directory: %w", err))
+	}
+
+	fmt.Printf("Loading CRDs from bundled sources...\n\n")
+
+	loaded := 0
+	skipped := 0
+
+	for group, entry := range sources {
+		// Use entry's default_version, fallback to "main" if not specified
+		version := entry.DefaultVersion
+		if version == "" {
+			version = "main"
+		}
+
+		url := entry.GetDownloadURL(version)
+		if url == "" {
+			if entry.Note != "" {
+				fmt.Printf("  %s: skipped (%s)\n", group, entry.Note)
+			} else {
+				fmt.Printf("  %s: skipped (no direct URL, only url_pattern available)\n", group)
+			}
+			skipped++
+			continue
+		}
+
+		fmt.Printf("  %s (version: %s)\n", group, version)
+		fmt.Printf("    Source: %s\n", url)
+
+		if err := loadAndStoreCRDFromURL(url, crdsDir); err != nil {
+			fmt.Printf("    Error: %v\n", err)
+			continue
+		}
+		loaded++
+	}
+
+	fmt.Printf("\nLoaded %d source(s), skipped %d\n", loaded, skipped)
+
+	// Show what's now loaded
+	if err := loadCRDsFromConfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+	}
+
+	types := globalCRDRegistry.ListTypes()
+	if len(types) > 0 {
+		fmt.Printf("\nTotal CRD types available: %d\n", len(types))
 	}
 }
 
@@ -802,15 +1054,26 @@ func loadAndStoreCRDFromURL(url, crdsDir string) error {
 		return fmt.Errorf("reading response: %w", err)
 	}
 
-	// Extract filename from URL
-	parts := strings.Split(url, "/")
-	filename := parts[len(parts)-1]
-	if filename == "" || !strings.HasSuffix(filename, ".yaml") {
-		filename = "crd-" + fmt.Sprintf("%d", len(url)%10000) + ".yaml"
+	// Extract canonical filename from CRD metadata (includes storage version)
+	filename, err := ExtractCanonicalFilename(data)
+	if err != nil {
+		// Fallback to URL-based filename
+		parts := strings.Split(url, "/")
+		filename = parts[len(parts)-1]
+		if filename == "" || !strings.HasSuffix(filename, ".yaml") {
+			filename = "crd-" + fmt.Sprintf("%d", len(url)%10000) + ".yaml"
+		}
+	}
+
+	destPath := filepath.Join(crdsDir, filename)
+
+	// Check if file exists (skip unless --force)
+	if exists, reason := CRDFileExists(destPath); exists && !forceOverwrite {
+		fmt.Printf("Skipped: %s -> %s (%s)\n", url, destPath, reason)
+		return nil
 	}
 
 	// Write to config directory
-	destPath := filepath.Join(crdsDir, filename)
 	if err := os.WriteFile(destPath, data, 0644); err != nil {
 		return fmt.Errorf("writing to config: %w", err)
 	}
@@ -826,10 +1089,22 @@ func loadAndStoreCRDFromFile(source, crdsDir string) error {
 		return fmt.Errorf("reading file: %w", err)
 	}
 
-	filename := filepath.Base(source)
+	// Extract canonical filename from CRD metadata (includes storage version)
+	filename, err := ExtractCanonicalFilename(data)
+	if err != nil {
+		// Fallback to original filename
+		filename = filepath.Base(source)
+	}
+
+	destPath := filepath.Join(crdsDir, filename)
+
+	// Check if file exists (skip unless --force)
+	if exists, reason := CRDFileExists(destPath); exists && !forceOverwrite {
+		fmt.Printf("Skipped: %s -> %s (%s)\n", source, destPath, reason)
+		return nil
+	}
 
 	// Write to config directory
-	destPath := filepath.Join(crdsDir, filename)
 	if err := os.WriteFile(destPath, data, 0644); err != nil {
 		return fmt.Errorf("writing to config: %w", err)
 	}
