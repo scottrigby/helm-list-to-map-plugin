@@ -232,6 +232,32 @@ This approach:
 - **Handles K8s updates**: When you update the K8s API dependency, field signatures update automatically
 - **Requires merge key mapping**: The merge key for each type must still be specified, as it's defined on the parent struct field (e.g., `PodSpec.Containers`), not on the `Container` type itself
 
+### Why Not Use strategicpatch for Embedded K8s Types in CRDs?
+
+For direct K8s resources (Deployment, Pod, etc.), we use `strategicpatch.LookupPatchMetadataForSlice()` to get merge keys programmatically. This works because we have Go types to query.
+
+For CRDs with **embedded K8s core types** (like `spec.containers` containing `corev1.Container`), we only have YAML schemas - no Go types exist for the CRD itself. The `strategicpatch` API requires a Go struct to query:
+
+```go
+// This works for K8s types (we have Go types)
+patchMeta, _ := strategicpatch.NewPatchMetaFromStruct(corev1.PodSpec{})
+
+// This doesn't work for CRDs (no Go type exists)
+// CRDs only have YAML schemas, not Go structs
+```
+
+The `k8sTypeRegistry` bridges this gap specifically for **detecting embedded K8s core types within CRD schemas**. It matches CRD schema field names against known K8s type signatures. When a CRD's `spec.containers` field has properties matching `corev1.Container` (name, image, env, volumeMounts, etc.), we can infer the merge key should be `"name"`.
+
+This only applies to embedded core types. CRD-specific fields (not based on K8s types) must either:
+
+- Have explicit `x-kubernetes-list-map-keys` in the CRD schema, or
+- Be manually configured via `add-rule`
+
+| API               | Works On     | Used For                        |
+| ----------------- | ------------ | ------------------------------- |
+| `strategicpatch`  | Go types     | Direct K8s resources            |
+| `k8sTypeRegistry` | YAML schemas | Embedded K8s core types in CRDs |
+
 Currently detected embedded types:
 
 | Type                     | Merge Key       | Common Field Names         |
