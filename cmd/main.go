@@ -42,9 +42,28 @@ var (
 	dryRun           bool
 	backupExt        string
 	configPath       string
+	recursive        bool
 	conf             Config
 	transformedPaths []PathInfo
 )
+
+// SubchartConversion tracks what was converted in a subchart
+type SubchartConversion struct {
+	Name           string     // Subchart name (used as prefix in umbrella values)
+	ConvertedPaths []PathInfo // Paths that were converted
+}
+
+// ChartDependency represents a dependency from Chart.yaml
+type ChartDependency struct {
+	Name       string `yaml:"name"`
+	Repository string `yaml:"repository"`
+	Condition  string `yaml:"condition,omitempty"`
+}
+
+// ChartYAML represents the relevant parts of Chart.yaml
+type ChartYAML struct {
+	Dependencies []ChartDependency `yaml:"dependencies"`
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -130,6 +149,7 @@ func runDetect() {
 	fs.StringVar(&configPath, "config", "", "path to user config")
 	verbose := false
 	fs.BoolVar(&verbose, "v", false, "verbose output (show template files, partials, and warnings)")
+	fs.BoolVar(&recursive, "recursive", false, "recursively detect in file:// subcharts")
 	fs.Usage = func() {
 		fmt.Print(`
 Scan a Helm chart to detect arrays that can be converted to maps based on
@@ -146,6 +166,7 @@ Flags:
       --chart string    path to chart root (default: current directory)
       --config string   path to user config (default: $HELM_CONFIG_HOME/list-to-map/config.yaml)
   -h, --help            help for detect
+      --recursive       recursively detect in file:// subcharts (for umbrella charts)
   -v                    verbose output (show template files, partials, and warnings)
 
 Examples:
@@ -158,6 +179,9 @@ Examples:
 
   # Verbose output to see warnings and partial templates
   helm list-to-map detect --chart ./my-chart -v
+
+  # Detect in umbrella chart and all file:// subcharts
+  helm list-to-map detect --chart ./umbrella-chart --recursive
 `)
 	}
 	_ = fs.Parse(os.Args[2:])
@@ -165,6 +189,12 @@ Examples:
 	root, err := findChartRoot(chartDir)
 	if err != nil {
 		fatal(err)
+	}
+
+	// Handle recursive detection for umbrella charts
+	if recursive {
+		runRecursiveDetect(root, verbose)
+		return
 	}
 
 	// Load CRDs from plugin config directory
@@ -591,6 +621,7 @@ func runConvert() {
 	fs.StringVar(&configPath, "config", "", "path to user config")
 	fs.BoolVar(&dryRun, "dry-run", false, "preview changes without writing files")
 	fs.StringVar(&backupExt, "backup-ext", ".bak", "backup file extension")
+	fs.BoolVar(&recursive, "recursive", false, "recursively convert file:// subcharts and update umbrella values")
 	fs.Usage = func() {
 		fmt.Print(`
 Transform array-based configurations to map-based configurations in values.yaml
@@ -616,6 +647,7 @@ Flags:
       --config string       path to user config (default: $HELM_CONFIG_HOME/list-to-map/config.yaml)
       --dry-run             preview changes without writing files
   -h, --help                help for convert
+      --recursive           recursively convert file:// subcharts and update umbrella values
 
 Examples:
   # Convert a chart with built-in K8s types
@@ -627,6 +659,9 @@ Examples:
 
   # Preview changes without modifying files
   helm list-to-map convert --dry-run
+
+  # Convert umbrella chart and all file:// subcharts recursively
+  helm list-to-map convert --chart ./umbrella-chart --recursive
 `)
 	}
 	_ = fs.Parse(os.Args[2:])
@@ -634,6 +669,12 @@ Examples:
 	root, err := findChartRoot(chartDir)
 	if err != nil {
 		fatal(err)
+	}
+
+	// Handle recursive conversion of umbrella charts
+	if recursive {
+		runRecursiveConvert(root)
+		return
 	}
 
 	// Load CRDs from plugin config directory
@@ -1310,6 +1351,394 @@ func findChartRoot(start string) (string, error) {
 		p = np
 	}
 	return "", fmt.Errorf("chart.yaml not found starting from %s", start)
+}
+
+// parseChartDependencies reads Chart.yaml and returns file:// dependencies
+func parseChartDependencies(chartRoot string) ([]ChartDependency, error) {
+	chartPath := filepath.Join(chartRoot, "Chart.yaml")
+	data, err := os.ReadFile(chartPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading Chart.yaml: %w", err)
+	}
+
+	var chart ChartYAML
+	if err := yaml.Unmarshal(data, &chart); err != nil {
+		return nil, fmt.Errorf("parsing Chart.yaml: %w", err)
+	}
+
+	// Filter to only file:// dependencies
+	var fileDeps []ChartDependency
+	for _, dep := range chart.Dependencies {
+		if strings.HasPrefix(dep.Repository, "file://") {
+			fileDeps = append(fileDeps, dep)
+		}
+	}
+
+	return fileDeps, nil
+}
+
+// resolveSubchartPath resolves a file:// repository reference to an absolute path
+func resolveSubchartPath(umbrellaRoot, repository string) string {
+	// Remove file:// prefix
+	relPath := strings.TrimPrefix(repository, "file://")
+	// Resolve relative to umbrella chart root
+	return filepath.Join(umbrellaRoot, relPath)
+}
+
+// convertSubchartAndTrack converts a subchart and returns the converted paths
+func convertSubchartAndTrack(subchartPath string) (*SubchartConversion, error) {
+	// Reset global transformedPaths before conversion
+	transformedPaths = nil
+
+	// Load CRDs from plugin config directory
+	if err := loadCRDsFromConfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: loading CRDs: %v\n", err)
+	}
+
+	// Use programmatic detection via K8s API introspection
+	candidates, err := detectConversionCandidates(subchartPath)
+	if err != nil {
+		return nil, fmt.Errorf("detecting candidates: %w", err)
+	}
+
+	// Also check for user-defined rules (for CRDs)
+	userDetected := scanForUserRules(subchartPath)
+	candidates = append(candidates, userDetected...)
+
+	// Build PathInfo list and check which paths have matching template patterns
+	var pathInfos []PathInfo
+	for _, c := range candidates {
+		pathInfos = append(pathInfos, PathInfo{
+			DotPath:     c.ValuesPath,
+			MergeKey:    c.MergeKey,
+			SectionName: c.SectionName,
+		})
+	}
+
+	// Check template patterns BEFORE converting values
+	matchedPaths := checkTemplatePatterns(subchartPath, pathInfos)
+
+	// Filter candidates to only include paths with matching template patterns
+	candidateMap := make(map[string]DetectedCandidate)
+	for _, c := range candidates {
+		if matchedPaths[c.ValuesPath] {
+			candidateMap[c.ValuesPath] = c
+		}
+	}
+
+	valuesPath := filepath.Join(subchartPath, "values.yaml")
+	doc, raw, err := loadValuesNode(valuesPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading values.yaml: %w", err)
+	}
+
+	// Use line-based editing to preserve original formatting
+	var edits []ArrayEdit
+	findArrayEdits(doc, nil, candidateMap, &edits)
+
+	if len(edits) > 0 {
+		out := applyLineEdits(raw, edits)
+
+		if !dryRun {
+			backupPath := valuesPath + backupExt
+			if err := backupFile(valuesPath, backupExt, raw); err != nil {
+				return nil, fmt.Errorf("backing up values.yaml: %w", err)
+			}
+			fmt.Printf("    Backup: %s\n", backupPath)
+			if err := os.WriteFile(valuesPath, out, 0644); err != nil {
+				return nil, fmt.Errorf("writing values.yaml: %w", err)
+			}
+		}
+
+		// Track converted paths
+		for _, edit := range edits {
+			transformedPaths = append(transformedPaths, PathInfo{
+				DotPath:     edit.Candidate.ValuesPath,
+				MergeKey:    edit.Candidate.MergeKey,
+				SectionName: edit.Candidate.SectionName,
+			})
+		}
+	}
+
+	// Rewrite templates
+	if !dryRun && len(transformedPaths) > 0 {
+		tchanges, _, err := rewriteTemplatesWithBackups(subchartPath, transformedPaths, backupExt, nil)
+		if err != nil {
+			return nil, fmt.Errorf("rewriting templates: %w", err)
+		}
+		for _, ch := range tchanges {
+			fmt.Printf("    Updated template: %s\n", ch)
+		}
+
+		// Create helper template
+		if ensureHelpersWithReport(subchartPath) {
+			fmt.Printf("    Created: templates/_listmap.tpl\n")
+		}
+	}
+
+	// Return conversion info
+	chartName := filepath.Base(subchartPath)
+	return &SubchartConversion{
+		Name:           chartName,
+		ConvertedPaths: transformedPaths,
+	}, nil
+}
+
+// updateUmbrellaValues updates the umbrella chart's values.yaml to convert arrays to maps
+// for paths that were converted in subcharts
+func updateUmbrellaValues(umbrellaRoot string, conversions []SubchartConversion) error {
+	valuesPath := filepath.Join(umbrellaRoot, "values.yaml")
+	doc, raw, err := loadValuesNode(valuesPath)
+	if err != nil {
+		return fmt.Errorf("loading umbrella values.yaml: %w", err)
+	}
+
+	// Build a map of subchart prefixed paths to their conversion info
+	// e.g., "judge-api.deployment.env" -> PathInfo{MergeKey: "name", ...}
+	subchartPaths := make(map[string]PathInfo)
+	for _, conv := range conversions {
+		for _, p := range conv.ConvertedPaths {
+			// Prefix with subchart name
+			prefixedPath := conv.Name + "." + p.DotPath
+			subchartPaths[prefixedPath] = p
+		}
+	}
+
+	// Find arrays in umbrella values that match subchart converted paths
+	candidateMap := make(map[string]DetectedCandidate)
+	for path, info := range subchartPaths {
+		candidateMap[path] = DetectedCandidate{
+			ValuesPath:  path,
+			MergeKey:    info.MergeKey,
+			SectionName: info.SectionName,
+		}
+	}
+
+	// Find array edits in umbrella values
+	var edits []ArrayEdit
+	findArrayEdits(doc, nil, candidateMap, &edits)
+
+	if len(edits) == 0 {
+		fmt.Println("\nNo umbrella values.yaml updates needed.")
+		return nil
+	}
+
+	// Apply edits
+	out := applyLineEdits(raw, edits)
+
+	if dryRun {
+		fmt.Println("\n=== Umbrella values.yaml updates (dry-run) ===")
+		for _, edit := range edits {
+			fmt.Printf("  Would convert: %s\n", edit.Candidate.ValuesPath)
+		}
+	} else {
+		backupPath := valuesPath + backupExt
+		if err := backupFile(valuesPath, backupExt, raw); err != nil {
+			return fmt.Errorf("backing up umbrella values.yaml: %w", err)
+		}
+		if err := os.WriteFile(valuesPath, out, 0644); err != nil {
+			return fmt.Errorf("writing umbrella values.yaml: %w", err)
+		}
+
+		fmt.Println("\nUpdated umbrella values.yaml:")
+		fmt.Printf("  Backup: %s\n", backupPath)
+		for _, edit := range edits {
+			fmt.Printf("  Converted: %s (key=%s)\n", edit.Candidate.ValuesPath, edit.Candidate.MergeKey)
+		}
+	}
+
+	return nil
+}
+
+// runRecursiveConvert handles the --recursive flag for umbrella charts
+// It converts all file:// subcharts and then updates the umbrella values.yaml
+func runRecursiveConvert(umbrellaRoot string) {
+	fmt.Printf("Recursive conversion for umbrella chart: %s\n", umbrellaRoot)
+
+	// Parse Chart.yaml to find file:// dependencies
+	deps, err := parseChartDependencies(umbrellaRoot)
+	if err != nil {
+		fatal(fmt.Errorf("parsing dependencies: %w", err))
+	}
+
+	if len(deps) == 0 {
+		fmt.Println("No file:// dependencies found in Chart.yaml.")
+		fmt.Println("Use --recursive only for umbrella charts with local subcharts.")
+		return
+	}
+
+	fmt.Printf("\nFound %d file:// subchart(s):\n", len(deps))
+	for _, dep := range deps {
+		fmt.Printf("  - %s (%s)\n", dep.Name, dep.Repository)
+	}
+
+	// Convert each subchart
+	var conversions []SubchartConversion
+	for _, dep := range deps {
+		subchartPath := resolveSubchartPath(umbrellaRoot, dep.Repository)
+
+		// Check if subchart exists
+		if _, err := os.Stat(filepath.Join(subchartPath, "Chart.yaml")); err != nil {
+			fmt.Fprintf(os.Stderr, "\nWarning: Subchart %s not found at %s, skipping\n", dep.Name, subchartPath)
+			continue
+		}
+
+		fmt.Printf("\n=== Converting subchart: %s ===\n", dep.Name)
+		fmt.Printf("  Path: %s\n", subchartPath)
+
+		conv, err := convertSubchartAndTrack(subchartPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  Error: %v\n", err)
+			continue
+		}
+
+		if len(conv.ConvertedPaths) == 0 {
+			fmt.Println("  No conversions needed")
+		} else {
+			fmt.Printf("  Converted %d path(s):\n", len(conv.ConvertedPaths))
+			for _, p := range conv.ConvertedPaths {
+				fmt.Printf("    - %s (key=%s)\n", p.DotPath, p.MergeKey)
+			}
+			conversions = append(conversions, *conv)
+		}
+	}
+
+	// Update umbrella values.yaml with converted subchart paths
+	if len(conversions) > 0 {
+		fmt.Printf("\n=== Updating umbrella values.yaml ===\n")
+		if err := updateUmbrellaValues(umbrellaRoot, conversions); err != nil {
+			fatal(err)
+		}
+	} else {
+		fmt.Println("\nNo subcharts were converted, umbrella values.yaml unchanged.")
+	}
+
+	// Summary
+	fmt.Println("\n=== Conversion Summary ===")
+	totalPaths := 0
+	for _, conv := range conversions {
+		totalPaths += len(conv.ConvertedPaths)
+	}
+	fmt.Printf("Subcharts converted: %d\n", len(conversions))
+	fmt.Printf("Total paths converted: %d\n", totalPaths)
+
+	if !dryRun {
+		fmt.Println("\nNote: Run 'helm dependency build' to rebuild chart dependencies.")
+	}
+}
+
+// runRecursiveDetect handles the --recursive flag for detect command
+// It detects convertible paths in all file:// subcharts
+func runRecursiveDetect(umbrellaRoot string, verbose bool) {
+	fmt.Printf("Recursive detection for umbrella chart: %s\n", umbrellaRoot)
+
+	// Parse Chart.yaml to find file:// dependencies
+	deps, err := parseChartDependencies(umbrellaRoot)
+	if err != nil {
+		fatal(fmt.Errorf("parsing dependencies: %w", err))
+	}
+
+	if len(deps) == 0 {
+		fmt.Println("No file:// dependencies found in Chart.yaml.")
+		fmt.Println("Use --recursive only for umbrella charts with local subcharts.")
+		return
+	}
+
+	fmt.Printf("\nFound %d file:// subchart(s):\n", len(deps))
+	for _, dep := range deps {
+		fmt.Printf("  - %s (%s)\n", dep.Name, dep.Repository)
+	}
+
+	// Load CRDs from plugin config directory
+	if err := loadCRDsFromConfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: loading CRDs: %v\n", err)
+	}
+
+	// Detect in each subchart
+	totalDetected := 0
+	totalSkipped := 0
+	for _, dep := range deps {
+		subchartPath := resolveSubchartPath(umbrellaRoot, dep.Repository)
+
+		// Check if subchart exists
+		if _, err := os.Stat(filepath.Join(subchartPath, "Chart.yaml")); err != nil {
+			fmt.Fprintf(os.Stderr, "\nWarning: Subchart %s not found at %s, skipping\n", dep.Name, subchartPath)
+			continue
+		}
+
+		fmt.Printf("\n=== Subchart: %s ===\n", dep.Name)
+
+		// Detect candidates
+		candidates, err := detectConversionCandidates(subchartPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  Error: %v\n", err)
+			continue
+		}
+
+		// Also check for user-defined rules
+		userDetected := scanForUserRules(subchartPath)
+		candidates = append(candidates, userDetected...)
+
+		// Check template patterns
+		var pathInfos []PathInfo
+		for _, c := range candidates {
+			pathInfos = append(pathInfos, PathInfo{
+				DotPath:     c.ValuesPath,
+				MergeKey:    c.MergeKey,
+				SectionName: c.SectionName,
+			})
+		}
+		matchedPaths := checkTemplatePatterns(subchartPath, pathInfos)
+
+		// Report results
+		var detected, skipped []DetectedCandidate
+		for _, c := range candidates {
+			if matchedPaths[c.ValuesPath] {
+				detected = append(detected, c)
+			} else {
+				skipped = append(skipped, c)
+			}
+		}
+
+		if len(detected) == 0 && len(skipped) == 0 {
+			fmt.Println("  No convertible arrays detected")
+			continue
+		}
+
+		if len(detected) > 0 {
+			fmt.Printf("  Convertible (%d):\n", len(detected))
+			for _, c := range detected {
+				if verbose {
+					fmt.Printf("    %s\n", c.ValuesPath)
+					fmt.Printf("      Key:  %s\n", c.MergeKey)
+					if c.ElementType != "" {
+						fmt.Printf("      Type: %s\n", c.ElementType)
+					}
+				} else {
+					fmt.Printf("    - %s (key=%s)\n", c.ValuesPath, c.MergeKey)
+				}
+			}
+			totalDetected += len(detected)
+		}
+
+		if len(skipped) > 0 {
+			fmt.Printf("  Skipped - unsupported template pattern (%d):\n", len(skipped))
+			for _, c := range skipped {
+				fmt.Printf("    - %s\n", c.ValuesPath)
+			}
+			totalSkipped += len(skipped)
+		}
+	}
+
+	// Summary
+	fmt.Println("\n=== Detection Summary ===")
+	fmt.Printf("Total convertible paths: %d\n", totalDetected)
+	fmt.Printf("Total skipped paths: %d\n", totalSkipped)
+
+	if totalDetected > 0 {
+		fmt.Println("\nTo convert, run:")
+		fmt.Printf("  helm list-to-map convert --chart %s --recursive\n", umbrellaRoot)
+	}
 }
 
 // loadValuesNode loads values.yaml as a yaml.Node tree to preserve comments and formatting

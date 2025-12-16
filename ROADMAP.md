@@ -94,15 +94,61 @@ CRDs that embed standard K8s types (Container, Volume, VolumeMount, etc.) are no
 
 When detected fields like `containers` or `initContainers` are found, the CLI now shows a warning (in verbose mode) that these contain nested list fields (`env`, `volumeMounts`, `ports`) and suggests breaking them up for better override granularity.
 
-### Better subchart handling
+### Umbrella Chart & Subchart Handling
 
-**Status:** Not started
+**Status:** Phase 1 Complete, Phases 2-3 Planned
 
-Improve detection of convertible fields in:
+See [DEPENDENCY-HANDLING-PLAN.md](docs/DEPENDENCY-HANDLING-PLAN.md) for full details.
 
-- Local subcharts (`charts/` directory)
-- Remote dependencies (after `helm dependency build`)
-- Inherited values from parent charts
+#### Phase 1: `--recursive` flag (Complete)
+
+Support for umbrella charts with `file://` dependencies:
+
+```bash
+# Detect in umbrella and all file:// subcharts
+helm list-to-map detect --chart ./umbrella --recursive
+
+# Convert umbrella and all file:// subcharts
+helm list-to-map convert --chart ./umbrella --recursive
+```
+
+Features:
+
+- Parses `Chart.yaml` to find `file://` dependencies
+- Converts subcharts at their source location
+- Automatically updates umbrella `values.yaml` to match
+
+#### Phase 2: `--include-charts-dir` flag (Planned)
+
+Support for embedded subcharts in `charts/` directory (not declared in Chart.yaml):
+
+```bash
+helm list-to-map convert --chart ./my-chart --include-charts-dir
+```
+
+Use case: Charts that vendor subcharts directly without using dependency declarations.
+
+#### Phase 3: `--expand-remote` flag (Planned)
+
+Support for remote dependencies (Helm repos, OCI registries):
+
+```bash
+helm list-to-map convert --chart ./umbrella --recursive --expand-remote
+```
+
+This will:
+
+- Extract tarballs in `charts/` to directories
+- Convert those directories
+- Print prominent warning about limitations
+
+**Warning:** Changes to remote dependencies will be lost on `helm dependency update`. This is a last-resort option for users who need to convert but cannot modify the source.
+
+Recommended workflow for remote dependencies:
+
+1. Convert at source repository (if you own it)
+2. File upstream issue (for community charts)
+3. Fork and use `file://` dependency (if neither option works)
 
 ### Multi-document template support
 

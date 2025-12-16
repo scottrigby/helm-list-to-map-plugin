@@ -175,6 +175,69 @@ This pattern is common in charts like kube-prometheus-stack.
 
 All patterns are matched using regex with multiline mode, handling variations in whitespace and formatting.
 
+## Umbrella Chart Support
+
+The plugin supports umbrella charts (charts that aggregate multiple subcharts via dependencies) with the `--recursive` flag.
+
+### How It Works
+
+```bash
+helm list-to-map convert --chart ./umbrella-chart --recursive
+```
+
+1. **Parse Chart.yaml**: Extract dependencies with `file://` repository references
+2. **Convert Subcharts**: For each `file://` dependency, navigate to the source location and run conversion
+3. **Track Changes**: Record which paths were converted in each subchart
+4. **Update Umbrella Values**: Convert matching arrays in umbrella's `values.yaml`
+
+### Why file:// Only?
+
+The `--recursive` flag only processes `file://` dependencies because:
+
+- **Source Control**: `file://` paths point to source files you can modify
+- **Persistence**: Changes survive `helm dependency update`
+- **Workflow Fit**: Umbrella charts with local subcharts are a common monorepo pattern
+
+Remote dependencies (Helm repos, OCI registries) are not converted because:
+
+- **No Source Access**: You can't modify files in a remote repository
+- **Ephemeral Changes**: `helm dependency update` overwrites local modifications
+- **Ownership**: Community charts shouldn't be locally modified
+
+### Umbrella Values Update
+
+When a subchart path is converted (e.g., `deployment.env` in `judge-api`), the umbrella's `values.yaml` must also be updated:
+
+```yaml
+# Before (umbrella values.yaml)
+judge-api:
+  deployment:
+    env:
+      - name: MY_VAR
+        value: "foo"
+
+# After
+judge-api:
+  deployment:
+    env:
+      MY_VAR:
+        value: "foo"
+```
+
+The plugin tracks converted paths per subchart and automatically applies matching updates to the umbrella.
+
+### Limitations
+
+Current limitations of umbrella chart support:
+
+| Limitation                      | Status                                                                  | Workaround                          |
+| ------------------------------- | ----------------------------------------------------------------------- | ----------------------------------- |
+| Remote dependencies             | Not supported                                                           | Convert at source, or use `file://` |
+| Embedded subcharts in `charts/` | Planned ([Phase 2](ROADMAP.md#phase-2-include-charts-dir-flag-planned)) | Use `convert` directly on subchart  |
+| Tarballs in `charts/`           | Planned ([Phase 3](ROADMAP.md#phase-3-expand-remote-flag-planned))      | Extract manually, then convert      |
+
+See [DEPENDENCY-HANDLING-PLAN.md](docs/DEPENDENCY-HANDLING-PLAN.md) for the full roadmap.
+
 ## CRD Schema Parsing
 
 Custom Resource Definitions (CRDs) are not part of the K8s API packages, but modern CRDs include OpenAPI v3 schemas with list-type annotations. The plugin extracts these to enable automatic detection for Custom Resources.
