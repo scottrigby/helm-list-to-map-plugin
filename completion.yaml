@@ -6,6 +6,7 @@ commands:
       - config
       - h
       - help
+      - v
   - name: convert
     flags:
       - chart
@@ -14,6 +15,17 @@ commands:
       - backup-ext
       - h
       - help
+  - name: load-crd
+    flags:
+      - common
+      - force
+      - h
+      - help
+  - name: list-crds
+    flags:
+      - h
+      - help
+      - v
   - name: add-rule
     flags:
       - path
