@@ -921,20 +921,6 @@ Examples:
 			continue
 		}
 	}
-
-	// Show what's now loaded
-	if err := loadCRDsFromConfig(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
-	}
-
-	types := globalCRDRegistry.ListTypes()
-	if len(types) > 0 {
-		fmt.Printf("\nLoaded %d CRD type(s):\n", len(types))
-		for _, t := range types {
-			fields := globalCRDRegistry.fields[t]
-			fmt.Printf("  %s (%d convertible fields)\n", t, len(fields))
-		}
-	}
 }
 
 // loadCommonCRDs loads CRDs from the bundled common-crds.yaml file
@@ -1183,22 +1169,39 @@ Flags:
 		return
 	}
 
-	fmt.Printf("Loaded CRD types (%d):\n", len(types))
-	for _, t := range types {
-		fields := globalCRDRegistry.fields[t]
-		fmt.Printf("\n%s\n", t)
-		if verbose {
+	if verbose {
+		// Verbose: show each CRD with its fields
+		fmt.Printf("Loaded CRD types (%d):\n", len(types))
+		for _, t := range types {
+			fields := globalCRDRegistry.fields[t]
+			fmt.Printf("\n%s (%d fields)\n", t, len(fields))
 			for _, f := range fields {
 				keys := strings.Join(f.MapKeys, ", ")
 				fmt.Printf("  · %s (key: %s)\n", f.Path, keys)
 			}
-		} else {
-			fmt.Printf("  %d convertible field(s)\n", len(fields))
 		}
-	}
+	} else {
+		// Compact: table format
+		// Find max CRD name length for alignment
+		maxLen := len("CRD Type")
+		for _, t := range types {
+			if len(t) > maxLen {
+				maxLen = len(t)
+			}
+		}
 
-	if !verbose && len(types) > 0 {
-		fmt.Println("\nUse -v flag to see all convertible fields.")
+		// Print table header
+		fmt.Printf("Loaded %d CRD type(s):\n\n", len(types))
+		fmt.Printf("%-*s  %s\n", maxLen, "CRD Type", "Convertible Fields")
+		fmt.Printf("%-*s  %s\n", maxLen, strings.Repeat("-", maxLen), "------------------")
+
+		// Print rows
+		for _, t := range types {
+			fields := globalCRDRegistry.fields[t]
+			fmt.Printf("%-*s  %d\n", maxLen, t, len(fields))
+		}
+
+		fmt.Println("\nUse -v to see field details.")
 	}
 }
 

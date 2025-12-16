@@ -324,6 +324,11 @@ func (r *CRDRegistry) loadFromBytes(data []byte, source string) error {
 			// Track this version for the group+kind
 			r.versions[groupKindKey] = appendUnique(r.versions[groupKindKey], version.Name)
 
+			// Ensure this CRD type is registered (even if no convertible fields)
+			if r.fields[key] == nil {
+				r.fields[key] = []CRDFieldInfo{}
+			}
+
 			// Extract list fields from the schema
 			var fields []CRDFieldInfo
 			allArrays := make(map[string]bool)
