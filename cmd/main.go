@@ -1076,10 +1076,10 @@ func loadAndStoreCRDFromFile(source, crdsDir string) error {
 	}
 
 	// Extract canonical filename from CRD metadata (includes storage version)
+	// This also validates that the file contains a valid CRD
 	filename, err := ExtractCanonicalFilename(data)
 	if err != nil {
-		// Fallback to original filename
-		filename = filepath.Base(source)
+		return fmt.Errorf("not a valid CRD: %w", err)
 	}
 
 	destPath := filepath.Join(crdsDir, filename)
@@ -1101,7 +1101,7 @@ func loadAndStoreCRDFromFile(source, crdsDir string) error {
 
 // loadAndStoreCRDsFromDirectory loads all CRD YAML files from a directory
 func loadAndStoreCRDsFromDirectory(sourceDir, crdsDir string) error {
-	var loaded int
+	var loaded, skipped int
 	err := filepath.WalkDir(sourceDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -1113,13 +1113,10 @@ func loadAndStoreCRDsFromDirectory(sourceDir, crdsDir string) error {
 			return nil
 		}
 
-		// Only try to load files that look like CRDs
-		if !strings.Contains(strings.ToLower(filepath.Base(path)), "crd") {
-			return nil
-		}
-
+		// Try to load each YAML file as a CRD
+		// Files that aren't valid CRDs are silently skipped
 		if err := loadAndStoreCRDFromFile(path, crdsDir); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: skipping %s: %v\n", path, err)
+			skipped++
 			return nil
 		}
 		loaded++
@@ -1131,7 +1128,11 @@ func loadAndStoreCRDsFromDirectory(sourceDir, crdsDir string) error {
 	}
 
 	if loaded == 0 {
-		fmt.Fprintf(os.Stderr, "Warning: no CRD files found in %s\n", sourceDir)
+		if skipped > 0 {
+			fmt.Fprintf(os.Stderr, "Warning: no CRD files found in %s (%d YAML file(s) checked but none contained CRDs)\n", sourceDir, skipped)
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: no YAML files found in %s\n", sourceDir)
+		}
 	} else {
 		fmt.Printf("\nLoaded %d CRD file(s) from %s\n", loaded, sourceDir)
 	}
