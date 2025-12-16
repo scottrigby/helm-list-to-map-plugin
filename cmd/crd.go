@@ -66,11 +66,12 @@ func buildK8sTypeRegistry() []k8sTypeSignature {
 		{"EnvVar", reflect.TypeOf(corev1.EnvVar{}), "name"},
 		{"ContainerPort", reflect.TypeOf(corev1.ContainerPort{}), "containerPort"},
 		{"HostAlias", reflect.TypeOf(corev1.HostAlias{}), "ip"},
-		{"Toleration", reflect.TypeOf(corev1.Toleration{}), "key"},
 		{"TopologySpreadConstraint", reflect.TypeOf(corev1.TopologySpreadConstraint{}), "topologyKey"},
 		{"LocalObjectReference", reflect.TypeOf(corev1.LocalObjectReference{}), "name"},
 		{"VolumeDevice", reflect.TypeOf(corev1.VolumeDevice{}), "devicePath"},
 		{"ResourceClaim", reflect.TypeOf(corev1.ResourceClaim{}), "name"},
+		// Note: Toleration intentionally excluded - K8s uses atomic replacement
+		// (tolerations can have same 'key' with different 'effect' values)
 	}
 
 	for _, t := range typesToRegister {

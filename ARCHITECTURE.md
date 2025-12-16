@@ -10,7 +10,7 @@ The plugin uses Kubernetes API introspection and CRD schema parsing to automatic
 
 1. **Parses templates** to find `apiVersion` and `kind` of K8s resources being constructed
 2. **Maps to K8s Go types** (e.g., `apps/v1` + `Deployment` → `appsv1.Deployment`) or looks up loaded CRD schemas
-3. **Reads [`patchMergeKey`](#the-patchmergekey-discovery) struct tags** from K8s API types, or [`x-kubernetes-list-map-keys`](#crd-schema-parsing) from CRD OpenAPI schemas
+3. **Queries merge keys** using the K8s [`strategicpatch` API](#the-patchmergekey-discovery), or parses [`x-kubernetes-list-map-keys`](#crd-schema-parsing) from CRD OpenAPI schemas
 4. **Converts values and templates** using a [single generic helper](#single-generic-helper)
 
 ## Why K8s API Introspection?
@@ -28,19 +28,13 @@ We chose introspection because:
 
 ## The patchMergeKey Discovery
 
-Kubernetes uses Strategic Merge Patch for applying changes to resources. The K8s API Go structs contain `patchMergeKey` struct tags that define which field uniquely identifies items in a list:
+Kubernetes uses Strategic Merge Patch for applying changes to resources. The `k8s.io/apimachinery/pkg/util/strategicpatch` package provides APIs to query merge key information programmatically:
 
 ```go
-// From k8s.io/api/core/v1/types.go
-type PodSpec struct {
-    Volumes []Volume `json:"volumes,omitempty" patchMergeKey:"name" ...`
-    Containers []Container `json:"containers" patchMergeKey:"name" ...`
-}
-
-type Container struct {
-    VolumeMounts []VolumeMount `json:"volumeMounts,omitempty" patchMergeKey:"mountPath" ...`
-    Ports []ContainerPort `json:"ports,omitempty" patchMergeKey:"containerPort" ...`
-}
+// Get merge key for a slice field using strategicpatch API
+patchMeta, _ := strategicpatch.NewPatchMetaFromStruct(corev1.PodSpec{})
+_, pm, _ := patchMeta.LookupPatchMetadataForSlice("volumes")
+mergeKey := pm.GetPatchMergeKey() // Returns "name"
 ```
 
 This is the definitive source for unique keys. Examples:
@@ -50,7 +44,17 @@ This is the definitive source for unique keys. Examples:
 - `volumeMounts` → keyed by `mountPath` (not `name`!)
 - `ports` → keyed by `containerPort` (not `name`!)
 
-Using `patchMergeKey` ensures the plugin uses the same uniqueness semantics as Kubernetes itself.
+Using the strategicpatch API ensures the plugin uses the same uniqueness semantics as Kubernetes itself.
+
+### Atomic Lists (No Merge Key)
+
+Some K8s list fields intentionally have no merge key - they use "atomic" replacement strategy. This means K8s replaces the entire list rather than merging individual items. Examples:
+
+- `tolerations` - Can have same `key` with different `effect` values
+- `sysctls` - Treated as atomic by K8s
+- `readinessGates` - Treated as atomic by K8s
+
+The plugin respects this design: fields without merge keys are reported as "arrays without auto-detected unique keys" and require explicit user rules if conversion is desired. This prevents incorrect assumptions about uniqueness semantics.
 
 ## Template-First Detection
 
@@ -237,12 +241,13 @@ Currently detected embedded types:
 | VolumeMount              | `mountPath`     | volumeMounts               |
 | EnvVar                   | `name`          | env                        |
 | ContainerPort            | `containerPort` | ports                      |
-| Toleration               | `key`           | tolerations                |
 | TopologySpreadConstraint | `topologyKey`   | topologySpreadConstraints  |
 | HostAlias                | `ip`            | hostAliases                |
 | VolumeDevice             | `devicePath`    | volumeDevices              |
 | ResourceClaim            | `name`          | claims                     |
 | LocalObjectReference     | `name`          | imagePullSecrets           |
+
+Note: Types like `Toleration` and `Sysctl` are intentionally excluded. Kubernetes uses atomic replacement for these fields (no merge key), so they require explicit user rules if conversion is desired.
 
 ### Loading CRDs
 
