@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -104,6 +105,20 @@ Available Commands:
 
 Flags:
   -h, --help   help for list-to-map
+
+IMPORTANT - Ordering Limitation:
+  Map-based values are rendered in alphabetical order (sorted by key).
+  For environment variables, this means $(VAR) references to other env vars
+  may not work if the referenced var comes later alphabetically.
+
+  Example that will BREAK after conversion:
+    env:
+      API_URL:           # "A" comes before "B"
+        value: "$(BASE_URL)/api"  # References BASE_URL
+      BASE_URL:          # Defined AFTER API_URL alphabetically
+        value: "https://example.com"
+
+  Ensure your env vars don't rely on definition order, or keep them as arrays.
 
 Use "helm list-to-map [command] --help" for more information about a command.
 `)
@@ -636,10 +651,39 @@ Examples:
 	userDetected := scanForUserRules(root)
 	candidates = append(candidates, userDetected...)
 
-	// Build map of paths to convert for empty array handling
-	candidateMap := make(map[string]DetectedCandidate)
+	// Build PathInfo list and check which paths have matching template patterns
+	var pathInfos []PathInfo
 	for _, c := range candidates {
-		candidateMap[c.ValuesPath] = c
+		pathInfos = append(pathInfos, PathInfo{
+			DotPath:     c.ValuesPath,
+			MergeKey:    c.MergeKey,
+			SectionName: c.SectionName,
+		})
+	}
+
+	// Check template patterns BEFORE converting values
+	// Only convert values for paths where template patterns actually match
+	matchedPaths := checkTemplatePatterns(root, pathInfos)
+
+	// Filter candidates to only include paths with matching template patterns
+	candidateMap := make(map[string]DetectedCandidate)
+	var skippedPaths []string
+	for _, c := range candidates {
+		if matchedPaths[c.ValuesPath] {
+			candidateMap[c.ValuesPath] = c
+		} else {
+			skippedPaths = append(skippedPaths, c.ValuesPath)
+		}
+	}
+
+	// Warn about paths that couldn't be converted
+	if len(skippedPaths) > 0 {
+		fmt.Println("\nSkipped (template pattern not supported):")
+		for _, p := range skippedPaths {
+			fmt.Printf("  %s\n", p)
+		}
+		fmt.Println("  These paths use inline append patterns (e.g., static entries + toYaml)")
+		fmt.Println("  that cannot be automatically converted.")
 	}
 
 	valuesPath := filepath.Join(root, "values.yaml")
@@ -669,6 +713,17 @@ Examples:
 			backupFiles = append(backupFiles, backupPath)
 			if err := os.WriteFile(valuesPath, out, 0644); err != nil {
 				fatal(err)
+			}
+		}
+
+		// Check if any env vars are being converted
+		hasEnvVars := false
+		for _, edit := range edits {
+			if strings.Contains(edit.Candidate.ElementType, "EnvVar") ||
+				strings.HasSuffix(edit.Candidate.ValuesPath, ".env") ||
+				strings.HasSuffix(edit.Candidate.ValuesPath, "Env") {
+				hasEnvVars = true
+				break
 			}
 		}
 
@@ -706,6 +761,14 @@ Examples:
 				MergeKey:    edit.Candidate.MergeKey,
 				SectionName: edit.Candidate.SectionName,
 			})
+		}
+
+		// Warn about env var ordering if applicable
+		if hasEnvVars {
+			fmt.Println("\n  WARNING: Environment variables will be rendered in alphabetical order.")
+			fmt.Println("  If any env var uses $(OTHER_VAR) syntax to reference another env var,")
+			fmt.Println("  ensure the referenced var comes BEFORE it alphabetically, or the")
+			fmt.Println("  reference will fail. See 'helm list-to-map --help' for details.")
 		}
 	} else {
 		fmt.Println("No changes needed in values.yaml.")
@@ -1769,6 +1832,38 @@ func matchGlob(pattern, text string) bool {
 	return true
 }
 
+// checkTemplatePatterns checks which paths have matching template patterns without modifying files
+// Returns a map of dotPath -> true if the path has a matching template pattern
+func checkTemplatePatterns(chartPath string, paths []PathInfo) map[string]bool {
+	matched := make(map[string]bool)
+	tdir := filepath.Join(chartPath, "templates")
+	_ = filepath.WalkDir(tdir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		if !strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml") && !strings.HasSuffix(path, ".tpl") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		content := string(data)
+
+		for _, p := range paths {
+			if matched[p.DotPath] {
+				continue // Already found a match
+			}
+			_, changed := replaceListBlocks(content, p.DotPath, p.MergeKey, p.SectionName)
+			if changed {
+				matched[p.DotPath] = true
+			}
+		}
+		return nil
+	})
+	return matched
+}
+
 // rewriteTemplatesWithBackups rewrites templates and tracks backup files
 func rewriteTemplatesWithBackups(chartPath string, paths []PathInfo, backupExtension string, existingBackups []string) ([]string, []string, error) {
 	var changed []string
@@ -1790,7 +1885,7 @@ func rewriteTemplatesWithBackups(chartPath string, paths []PathInfo, backupExten
 
 		for _, p := range paths {
 			// Use single generic helper for all conversions
-			newContent = replaceListBlocks(newContent, p.DotPath, p.MergeKey, p.SectionName)
+			newContent, _ = replaceListBlocks(newContent, p.DotPath, p.MergeKey, p.SectionName)
 		}
 
 		if newContent != orig {
@@ -1809,47 +1904,107 @@ func rewriteTemplatesWithBackups(chartPath string, paths []PathInfo, backupExten
 	return changed, backups, err
 }
 
-// replaceListBlocks replaces list rendering patterns with the generic helper
+// replaceListBlocks replaces toYaml calls for list fields with the listmap.items helper
 // Parameters:
-//   - dotPath: the .Values path (e.g., "volumes")
+//   - dotPath: the .Values path (e.g., "volumes", "deployment.env")
 //   - mergeKey: the patchMergeKey from K8s API (e.g., "name", "mountPath")
-//   - sectionName: the YAML section name (e.g., "volumes", "volumeMounts")
-func replaceListBlocks(tpl, dotPath, mergeKey, sectionName string) string {
-	// Build the helper call that will replace matched patterns
-	helperCall := fmt.Sprintf(`{{- include "chart.listmap.render" (dict "items" (index .Values %s) "key" %q "section" %q) }}`,
-		quotePath(dotPath), mergeKey, sectionName)
-
-	// Escape dotPath for regex (dots need escaping)
+//   - sectionName: unused, kept for compatibility
+//
+// Returns: (updated template content, whether any replacements were made)
+func replaceListBlocks(tpl, dotPath, mergeKey, _ string) (string, bool) {
+	origLen := len(tpl)
 	escapedDotPath := regexp.QuoteMeta(dotPath)
 
-	// Pattern 1: section:\n  {{- toYaml .Values.X | nindent N }}
-	reA := regexp.MustCompile(`(?ms)` + regexp.QuoteMeta(sectionName) + `:\s*\n\s*\{\{\-?\s*toYaml\s+\.Values\.` + escapedDotPath + `\s*\|\s*nindent\s*\d+\s*\}\}`)
-	tpl = reA.ReplaceAllString(tpl, helperCall)
+	// Helper call generator - just replaces toYaml with our helper, preserving the nindent
+	helperCall := func(indent int) string {
+		return fmt.Sprintf(`{{- include "chart.listmap.items" (dict "items" (index .Values %s) "key" %q) | nindent %d }}`,
+			quotePath(dotPath), mergeKey, indent)
+	}
 
-	// Pattern 2: {{- with .Values.X }}\nsection:\n  {{- toYaml . | nindent N }}\n{{- end }}
-	reB := regexp.MustCompile(`(?ms)\{\{-?\s*with\s+\.Values\.` + escapedDotPath + `\s*\}\}\s*` + regexp.QuoteMeta(sectionName) + `:\s*\n\s*\{\{\-?\s*toYaml\s+\.\s*\|\s*nindent\s*\d+\s*\}\}\s*\{\{-?\s*end\s*\}\}`)
-	tpl = reB.ReplaceAllString(tpl, helperCall)
+	// Pattern 1: {{- toYaml .Values.X | nindent N }}
+	// Direct toYaml with nindent - most common pattern
+	re1 := regexp.MustCompile(`\{\{-?\s*toYaml\s+\.Values\.` + escapedDotPath + `\s*\|\s*nindent\s*(\d+)\s*\}\}`)
+	tpl = re1.ReplaceAllStringFunc(tpl, func(match string) string {
+		submatches := re1.FindStringSubmatch(match)
+		if len(submatches) > 1 {
+			indent, _ := strconv.Atoi(submatches[1])
+			return helperCall(indent)
+		}
+		return match
+	})
 
-	// Pattern 3: section:\n  {{- range .Values.X }}...{{- end }}
-	reC := regexp.MustCompile(`(?ms)` + regexp.QuoteMeta(sectionName) + `:\s*\n\s*\{\{\-?\s*range\s+.*?\.Values\.` + escapedDotPath + `\s*\}\}.*?\{\{\-?\s*end\s*\}\}`)
-	tpl = reC.ReplaceAllString(tpl, helperCall)
+	// Pattern 2: {{ toYaml .Values.X | indent N }}
+	// toYaml with indent (no leading dash, no 'n' prefix)
+	re2 := regexp.MustCompile(`\{\{\s*toYaml\s+\.Values\.` + escapedDotPath + `\s*\|\s*indent\s*(\d+)\s*\}\}`)
+	tpl = re2.ReplaceAllStringFunc(tpl, func(match string) string {
+		submatches := re2.FindStringSubmatch(match)
+		if len(submatches) > 1 {
+			indent, _ := strconv.Atoi(submatches[1])
+			// indent doesn't add newline, but our helper expects nindent
+			// Use nindent with same value (adds leading newline which is usually desired)
+			return helperCall(indent)
+		}
+		return match
+	})
 
-	// Pattern 4: {{- if .Values.X }}\n  section:\n{{ toYaml .Values.X | indent N }}\n{{- end }}
-	// This is a common pattern in many Helm charts (conditional rendering with indent)
-	reD := regexp.MustCompile(`(?ms)\{\{-?\s*if\s+\.Values\.` + escapedDotPath + `\s*\}\}\s*\n\s*` + regexp.QuoteMeta(sectionName) + `:\s*\n\s*\{\{\s*toYaml\s+\.Values\.` + escapedDotPath + `\s*\|\s*indent\s*\d+\s*\}\}\s*\n\{\{-?\s*end\s*\}\}`)
-	tpl = reD.ReplaceAllString(tpl, helperCall)
+	// Pattern 3: {{- with .Values.X }}...{{- toYaml . | nindent N }}...{{- end }}
+	// "with" block pattern - replace the whole block, preserving leading whitespace
+	re3 := regexp.MustCompile(`(?ms)([ \t]*)\{\{-?\s*with\s+\.Values\.` + escapedDotPath + `\s*\}\}\s*(\S+):\s*\n\s*\{\{-?\s*toYaml\s+\.\s*\|\s*nindent\s*(\d+)\s*\}\}\s*\{\{-?\s*end\s*\}\}`)
+	tpl = re3.ReplaceAllStringFunc(tpl, func(match string) string {
+		submatches := re3.FindStringSubmatch(match)
+		if len(submatches) > 3 {
+			leadingSpace := submatches[1]
+			sectionName := submatches[2]
+			indent, _ := strconv.Atoi(submatches[3])
+			// Keep the section name with proper indentation
+			return fmt.Sprintf(`%s{{- if (index .Values %s) }}
+%s%s:
+%s
+%s{{- end }}`, leadingSpace, quotePath(dotPath), leadingSpace, sectionName, helperCall(indent), leadingSpace)
+		}
+		return match
+	})
 
-	// Pattern 5: {{- if .Values.X }}\n  section:\n  {{- toYaml .Values.X | nindent N }}\n{{- end }}
-	// Same as pattern 4 but with nindent
-	reE := regexp.MustCompile(`(?ms)\{\{-?\s*if\s+\.Values\.` + escapedDotPath + `\s*\}\}\s*\n\s*` + regexp.QuoteMeta(sectionName) + `:\s*\n\s*\{\{-?\s*toYaml\s+\.Values\.` + escapedDotPath + `\s*\|\s*nindent\s*\d+\s*\}\}\s*\n\{\{-?\s*end\s*\}\}`)
-	tpl = reE.ReplaceAllString(tpl, helperCall)
+	// Pattern 4: {{- if .Values.X }}\n  section:\n...toYaml...{{- end }}
+	// Conditional block with section - replace toYaml inside
+	re4 := regexp.MustCompile(`(?ms)(\{\{-?\s*if\s+\.Values\.` + escapedDotPath + `\s*\}\}\s*\n\s*\S+:\s*\n\s*)\{\{-?\s*toYaml\s+\.Values\.` + escapedDotPath + `\s*\|\s*nindent\s*(\d+)\s*\}\}(\s*\n\{\{-?\s*end\s*\}\})`)
+	tpl = re4.ReplaceAllStringFunc(tpl, func(match string) string {
+		submatches := re4.FindStringSubmatch(match)
+		if len(submatches) > 3 {
+			prefix := submatches[1]
+			indent, _ := strconv.Atoi(submatches[2])
+			suffix := submatches[3]
+			return prefix + helperCall(indent) + suffix
+		}
+		return match
+	})
 
-	// Pattern 6: {{- include "chart.X.render" (dict "X" ...) }} - existing helper calls
-	// This handles templates that were already converted with specialized helpers
-	reF := regexp.MustCompile(`\{\{-?\s*include\s+"chart\.` + regexp.QuoteMeta(sectionName) + `\.render"\s*\(dict\s+"` + regexp.QuoteMeta(sectionName) + `"\s*\(index\s+\.Values\s+` + regexp.QuoteMeta(quotePath(dotPath)) + `\)\)\s*\}\}`)
-	tpl = reF.ReplaceAllString(tpl, helperCall)
+	// Pattern 5: {{- range .Values.X }}...{{- end }}
+	// Range loop pattern - capture the indent from context
+	re5 := regexp.MustCompile(`(?ms)([ \t]*)(\S+):\s*\n\s*\{\{-?\s*range\s+\.Values\.` + escapedDotPath + `\s*\}\}.*?\{\{-?\s*end\s*\}\}`)
+	tpl = re5.ReplaceAllStringFunc(tpl, func(match string) string {
+		submatches := re5.FindStringSubmatch(match)
+		if len(submatches) > 2 {
+			leadingSpace := submatches[1]
+			sectionName := submatches[2]
+			indent := len(leadingSpace) + 2 // section indent + 2 for list items
+			return fmt.Sprintf(`{{- if (index .Values %s) }}
+%s%s:
+%s
+{{- end }}`, quotePath(dotPath), leadingSpace, sectionName, helperCall(indent))
+		}
+		return match
+	})
 
-	return tpl
+	// Pattern 6: Existing old-style helper calls - update to new format
+	re6 := regexp.MustCompile(`\{\{-?\s*include\s+"chart\.\S+\.render"\s*\(dict\s+"\S+"\s*\(index\s+\.Values\s+` + regexp.QuoteMeta(quotePath(dotPath)) + `\)\)\s*\}\}`)
+	if re6.MatchString(tpl) {
+		// Just mark as changed - these need manual review since we don't know the indent
+		tpl = re6.ReplaceAllString(tpl, helperCall(8)) // Default indent
+	}
+
+	changed := len(tpl) != origLen
+	return tpl, changed
 }
 
 func quotePath(dotPath string) string {
@@ -1878,25 +2033,22 @@ func ensureHelpersWithReport(root string) bool {
 	return err == nil
 }
 
-// listMapHelper returns a single generic helper template that works for any list type
+// listMapHelper returns a helper template that renders map items as a YAML list
 // Parameters:
 //   - items: the map of items (keyed by merge key value)
 //   - key: the patchMergeKey field name (e.g., "name", "mountPath", "containerPort")
-//   - section: the YAML section name (e.g., "volumes", "volumeMounts", "ports")
+//
+// Output: YAML list items without section name, suitable for use with nindent
 func listMapHelper() string {
 	return `
-{{- define "chart.listmap.render" -}}
+{{- define "chart.listmap.items" -}}
 {{- $items := .items -}}
 {{- $key := .key -}}
-{{- $section := .section -}}
-{{- if $items }}
-{{ $section }}:
 {{- range $keyVal := keys $items | sortAlpha }}
 {{- $spec := get $items $keyVal }}
-  - {{ $key }}: {{ $keyVal | quote }}
+- {{ $key }}: {{ $keyVal | quote }}
 {{- if $spec }}
-{{ toYaml $spec | nindent 4 }}
-{{- end }}
+{{ toYaml $spec | indent 2 }}
 {{- end }}
 {{- end }}
 {{- end -}}`

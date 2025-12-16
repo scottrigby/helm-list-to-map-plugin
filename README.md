@@ -278,3 +278,29 @@ Usage:
 Flags:
   -h, --help   help for rules
 ```
+
+## Limitations
+
+### Environment Variable Ordering
+
+**Important**: Map-based values are rendered in **alphabetical order** (sorted by key). This affects environment variables that reference other env vars using Kubernetes' `$(VAR_NAME)` syntax.
+
+In Kubernetes, environment variables are processed in order, and `$(VAR_NAME)` references are resolved using previously-defined variables. After conversion, env vars are sorted alphabetically, which may break references if the referenced variable comes later in the alphabet.
+
+**Example that will break:**
+
+```yaml
+# After conversion, these are sorted alphabetically
+env:
+  API_URL: # "A" comes before "B" - processed first
+    value: "$(BASE_URL)/api" # ERROR: BASE_URL not defined yet!
+  BASE_URL: # "B" comes after "A" - processed second
+    value: "https://example.com"
+```
+
+**Solutions:**
+
+1. **Avoid cross-references**: Don't use `$(VAR)` syntax to reference other env vars
+2. **Keep as arrays**: Don't convert env vars that have ordering dependencies
+
+**Safe field types**: `volumes`, `volumeMounts`, `ports`, `containers`, and most other list fields don't have ordering dependencies and are safe to convert
