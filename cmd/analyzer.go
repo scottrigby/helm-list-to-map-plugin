@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/client-go/kubernetes/scheme"
 )
 
@@ -54,7 +55,8 @@ type FieldInfo struct {
 }
 
 // navigateFieldSchema traverses a K8s type hierarchy following a YAML path
-// and returns information about the field at that path
+// and returns information about the field at that path.
+// Uses K8s strategicpatch API to get merge keys programmatically.
 func navigateFieldSchema(rootType reflect.Type, yamlPath string) (*FieldInfo, error) {
 	if rootType == nil {
 		return nil, fmt.Errorf("nil root type")
@@ -62,7 +64,10 @@ func navigateFieldSchema(rootType reflect.Type, yamlPath string) (*FieldInfo, er
 
 	parts := strings.Split(yamlPath, ".")
 	currentType := rootType
-	var lastPatchMergeKey string
+
+	// Track parent structs for strategicpatch lookups
+	// parentType is the struct containing the slice field
+	var parentType reflect.Type
 
 	for i, part := range parts {
 		// Handle pointer types
@@ -77,15 +82,13 @@ func navigateFieldSchema(rootType reflect.Type, yamlPath string) (*FieldInfo, er
 			return nil, fmt.Errorf("expected struct at %s, got %s", strings.Join(parts[:i], "."), currentType.Kind())
 		}
 
+		// Track parent type before navigating into the field
+		parentType = currentType
+
 		// Find field by json tag
 		field, found := findFieldByJSONTag(currentType, part)
 		if !found {
 			return nil, fmt.Errorf("field %q not found in %s", part, currentType.Name())
-		}
-
-		// Capture patchMergeKey if present
-		if pmk := field.Tag.Get("patchMergeKey"); pmk != "" {
-			lastPatchMergeKey = pmk
 		}
 
 		currentType = field.Type
@@ -93,8 +96,6 @@ func navigateFieldSchema(rootType reflect.Type, yamlPath string) (*FieldInfo, er
 		// If this is a slice and not the last element, get the element type
 		if currentType.Kind() == reflect.Slice && i < len(parts)-1 {
 			currentType = currentType.Elem()
-			// Reset merge key when descending into slice element
-			lastPatchMergeKey = ""
 		}
 	}
 
@@ -116,10 +117,52 @@ func navigateFieldSchema(rootType reflect.Type, yamlPath string) (*FieldInfo, er
 		if info.ElementType.Kind() == reflect.Ptr {
 			info.ElementType = info.ElementType.Elem()
 		}
-		info.MergeKey = lastPatchMergeKey
+
+		// Get merge key using K8s strategicpatch API
+		lastPart := parts[len(parts)-1]
+		lastPart = strings.TrimSuffix(lastPart, "[]")
+		info.MergeKey = getMergeKeyFromStrategicPatch(parentType, lastPart)
+
+		// Fall back to hardcoded map for types without official K8s merge keys
+		// (e.g., tolerations which uses atomic replacement by default)
+		if info.MergeKey == "" {
+			info.MergeKey = GetK8sTypeMergeKey(info.ElementType)
+		}
 	}
 
 	return info, nil
+}
+
+// getMergeKeyFromStrategicPatch uses K8s strategicpatch API to get merge key for a slice field
+func getMergeKeyFromStrategicPatch(structType reflect.Type, fieldName string) string {
+	if structType == nil {
+		return ""
+	}
+
+	// Handle pointer types
+	if structType.Kind() == reflect.Ptr {
+		structType = structType.Elem()
+	}
+
+	if structType.Kind() != reflect.Struct {
+		return ""
+	}
+
+	// Create a zero value of the struct type for strategicpatch lookup
+	structValue := reflect.New(structType).Elem().Interface()
+
+	patchMeta, err := strategicpatch.NewPatchMetaFromStruct(structValue)
+	if err != nil {
+		return ""
+	}
+
+	// Look up the merge key for this slice field
+	_, pm, err := patchMeta.LookupPatchMetadataForSlice(fieldName)
+	if err != nil {
+		return ""
+	}
+
+	return pm.GetPatchMergeKey()
 }
 
 // findFieldByJSONTag finds a struct field by its json tag name
@@ -525,11 +568,16 @@ func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) 
 					continue
 				}
 				// For slices without merge key, try CRD registry as fallback
-				if fieldInfo == nil && hasCRDType {
-					fieldInfo = isConvertibleCRDField(parsed.APIVersion, parsed.Kind, fullYAMLPath)
+				// Also try CRD if K8s type exists but has no patchMergeKey
+				if (fieldInfo == nil || fieldInfo.MergeKey == "") && hasCRDType {
+					crdInfo := isConvertibleCRDField(parsed.APIVersion, parsed.Kind, fullYAMLPath)
+					if crdInfo != nil {
+						fieldInfo = crdInfo
+					}
 				}
 
-				if fieldInfo == nil {
+				// No merge key found from K8s types or CRD registry
+				if fieldInfo == nil || fieldInfo.MergeKey == "" {
 					// Field is either:
 					// 1. A slice without patchMergeKey (fieldCheck == FieldSliceNoKey)
 					// 2. Not found in K8s types but might be in CRD (fieldCheck == FieldNotFound)

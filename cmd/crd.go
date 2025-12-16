@@ -40,7 +40,16 @@ func init() {
 	k8sTypeRegistry = buildK8sTypeRegistry()
 }
 
-// buildK8sTypeRegistry creates type signatures from actual K8s API types
+// GetK8sTypeMergeKey returns empty string - we don't provide fallback merge keys
+// for K8s types that use atomic replacement. K8s API designers intentionally chose
+// not to provide merge keys for certain fields (like tolerations) because the
+// uniqueness semantics are complex (e.g., tolerations can have same 'key' with
+// different 'effect' values). Users should explicitly add rules if they want to
+// convert these fields, understanding the implications.
+func GetK8sTypeMergeKey(_ reflect.Type) string {
+	return ""
+}
+
 func buildK8sTypeRegistry() []k8sTypeSignature {
 	var registry []k8sTypeSignature
 
