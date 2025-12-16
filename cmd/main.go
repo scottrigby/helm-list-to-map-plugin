@@ -2205,7 +2205,14 @@ func applyLineEdits(original []byte, edits []ArrayEdit) []byte {
 			// Multi-line array - transform each "- key: value" to "key:\n  otherfields"
 			// Extract the array lines
 			arrayLines := lines[keyLineIdx+1 : valueEndIdx+1]
-			transformedLines := transformArrayToMap(arrayLines, edit.Candidate.MergeKey)
+			// Calculate expected indentation for map entries (should be under the parent key)
+			// KeyColumn is 1-based, so KeyColumn=1 means column 0
+			parentKeyIndent := 0
+			if edit.KeyColumn > 1 {
+				parentKeyIndent = edit.KeyColumn - 1
+			}
+			mapEntryIndent := parentKeyIndent + 2 // Map entries should be indented under parent key
+			transformedLines := transformArrayToMapWithIndent(arrayLines, edit.Candidate.MergeKey, mapEntryIndent)
 
 			// Check for commented-out examples after the array that should be removed
 			// These are comments that look like YAML structure (e.g., "#   secret:" or "# - name:")
@@ -2265,10 +2272,17 @@ func applyLineEdits(original []byte, edits []ArrayEdit) []byte {
 	return []byte(strings.Join(lines, "\n"))
 }
 
-// transformArrayToMap transforms YAML array lines to map format
+// transformArrayToMap transforms YAML array lines to map format (legacy wrapper)
 // Input:  ["  - name: foo", "    value: bar", "  - name: baz", "    value: qux"]
 // Output: ["  foo:", "    value: bar", "  baz:", "    value: qux"]
 func transformArrayToMap(arrayLines []string, mergeKey string) []string {
+	// Use -1 for mapEntryIndent to preserve original behavior (use array item's indent)
+	return transformArrayToMapWithIndent(arrayLines, mergeKey, -1)
+}
+
+// transformArrayToMapWithIndent transforms YAML array lines to map format with explicit indentation
+// mapEntryIndent specifies the indentation for map keys; -1 means use the array item's indent
+func transformArrayToMapWithIndent(arrayLines []string, mergeKey string, mapEntryIndent int) []string {
 	var result []string
 	var currentItemLines []string
 	var baseIndent string
@@ -2281,7 +2295,7 @@ func transformArrayToMap(arrayLines []string, mergeKey string) []string {
 		if strings.HasPrefix(trimmed, "- ") {
 			// Process previous item if any
 			if inItem && len(currentItemLines) > 0 {
-				transformed := transformSingleItem(currentItemLines, mergeKey, baseIndent)
+				transformed := transformSingleItemWithIndent(currentItemLines, mergeKey, baseIndent, mapEntryIndent)
 				result = append(result, transformed...)
 			}
 
@@ -2297,15 +2311,21 @@ func transformArrayToMap(arrayLines []string, mergeKey string) []string {
 
 	// Process last item
 	if inItem && len(currentItemLines) > 0 {
-		transformed := transformSingleItem(currentItemLines, mergeKey, baseIndent)
+		transformed := transformSingleItemWithIndent(currentItemLines, mergeKey, baseIndent, mapEntryIndent)
 		result = append(result, transformed...)
 	}
 
 	return result
 }
 
-// transformSingleItem transforms a single array item from list to map format
+// transformSingleItem transforms a single array item from list to map format (legacy wrapper)
 func transformSingleItem(itemLines []string, mergeKey, baseIndent string) []string {
+	return transformSingleItemWithIndent(itemLines, mergeKey, baseIndent, -1)
+}
+
+// transformSingleItemWithIndent transforms a single array item from list to map format
+// mapEntryIndent specifies the indentation for map keys; -1 means use baseIndent (array item's indent)
+func transformSingleItemWithIndent(itemLines []string, mergeKey, baseIndent string, mapEntryIndent int) []string {
 	if len(itemLines) == 0 {
 		return nil
 	}
@@ -2313,6 +2333,20 @@ func transformSingleItem(itemLines []string, mergeKey, baseIndent string) []stri
 	var result []string
 	var mergeKeyValue string
 	var mergeKeyLineComment string
+
+	// Calculate the indentation for map keys
+	// If mapEntryIndent is -1, use the array item's indentation (baseIndent)
+	// Otherwise, use the explicit mapEntryIndent
+	keyIndentStr := baseIndent
+	if mapEntryIndent >= 0 {
+		keyIndentStr = strings.Repeat(" ", mapEntryIndent)
+	}
+
+	// Content under the map key should be indented 2 more spaces
+	contentIndent := len(keyIndentStr) + 2
+
+	// Calculate where array content was originally (for relative indentation)
+	arrayContentIndent := len(baseIndent) + 2 // Content under "- " is at baseIndent + 2
 
 	// Parse first line to extract merge key if present
 	firstLine := itemLines[0]
@@ -2335,7 +2369,7 @@ func transformSingleItem(itemLines []string, mergeKey, baseIndent string) []stri
 			}
 
 			// Start result with the map key
-			result = append(result, fmt.Sprintf("%s%s:%s", baseIndent, mergeKeyValue, mergeKeyLineComment))
+			result = append(result, fmt.Sprintf("%s%s:%s", keyIndentStr, mergeKeyValue, mergeKeyLineComment))
 
 			// Add remaining fields from first line (if any after the merge key on same line)
 			// This handles compact format like "- name: foo value: bar"
@@ -2350,7 +2384,7 @@ func transformSingleItem(itemLines []string, mergeKey, baseIndent string) []stri
 				if len(parts) == 2 {
 					key := parts[0]
 					val := strings.TrimSpace(parts[1])
-					result = append(result, fmt.Sprintf("%s  %s: %s", baseIndent, key, val))
+					result = append(result, fmt.Sprintf("%s%s: %s", strings.Repeat(" ", contentIndent), key, val))
 				}
 			}
 		}
@@ -2360,6 +2394,7 @@ func transformSingleItem(itemLines []string, mergeKey, baseIndent string) []stri
 	for i := 1; i < len(itemLines); i++ {
 		line := itemLines[i]
 		trimmed := strings.TrimLeft(line, " ")
+		lineIndent := len(line) - len(trimmed)
 
 		// Check if this line contains the merge key
 		if strings.HasPrefix(trimmed, mergeKey+":") && mergeKeyValue == "" {
@@ -2375,14 +2410,18 @@ func transformSingleItem(itemLines []string, mergeKey, baseIndent string) []stri
 			}
 
 			// Insert the map key at the beginning
-			keyLine := fmt.Sprintf("%s%s:%s", baseIndent, mergeKeyValue, mergeKeyLineComment)
+			keyLine := fmt.Sprintf("%s%s:%s", keyIndentStr, mergeKeyValue, mergeKeyLineComment)
 			result = append([]string{keyLine}, result...)
 		} else {
-			// Regular field - keep it but adjust indentation
-			// Original: 4 spaces + field (under "- name:")
-			// New: 2 spaces + field (under "keyValue:")
-			// The relative indentation stays the same
-			result = append(result, line)
+			// Regular field - adjust indentation to be under the map key
+			// Calculate relative indentation from original array content position
+			relativeIndent := lineIndent - arrayContentIndent
+			if relativeIndent < 0 {
+				relativeIndent = 0
+			}
+			newIndent := contentIndent + relativeIndent
+			adjustedLine := strings.Repeat(" ", newIndent) + trimmed
+			result = append(result, adjustedLine)
 		}
 	}
 

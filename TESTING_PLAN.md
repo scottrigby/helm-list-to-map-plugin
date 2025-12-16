@@ -1010,3 +1010,38 @@ test-update-golden:
 - Tests requiring network are skipped with `-short`
 - Golden file updates require explicit `-update-golden` flag
 - The global `globalCRDRegistry` must be reset between tests
+
+## Important Test Cases to Add
+
+### Array Indentation Tests
+
+**CRITICAL**: The plugin must correctly handle YAML arrays where items start at the same indentation as the parent key. This is valid YAML:
+
+```yaml
+volumes:
+  - name: data
+    emptyDir: {}
+```
+
+This is equivalent to:
+
+```yaml
+volumes:
+  - name: data
+    emptyDir: {}
+```
+
+After conversion, both forms MUST produce map entries indented properly under the parent key:
+
+```yaml
+volumes:
+  data:
+    emptyDir: {}
+```
+
+The `transformSingleItemWithIndent` function uses the parent key's column position (`edit.KeyColumn`) to calculate correct indentation, not the array item's indentation. Tests should verify:
+
+1. Arrays with items at same indent as parent key (minio-style)
+2. Arrays with items indented under parent key (standard style)
+3. Deeply nested arrays with various indentation styles
+4. Mixed indentation within the same values.yaml file
