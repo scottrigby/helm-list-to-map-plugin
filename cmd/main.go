@@ -13,6 +13,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/detect"
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/template"
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/transform"
 	"gopkg.in/yaml.v3"
 )
 
@@ -30,11 +33,14 @@ type Config struct {
 	SortKeys           bool   `yaml:"sortKeys"`
 }
 
-type PathInfo struct {
-	DotPath     string
-	MergeKey    string // The patchMergeKey from K8s API (e.g., "name", "mountPath", "containerPort")
-	SectionName string // The YAML section name (e.g., "volumes", "volumeMounts", "ports")
-}
+// PathInfo is now in pkg/template
+type PathInfo = template.PathInfo
+
+// DetectedCandidate is now in pkg/detect
+type DetectedCandidate = detect.DetectedCandidate
+
+// ArrayEdit is now in pkg/transform
+type ArrayEdit = transform.ArrayEdit
 
 var (
 	subcmd           string

@@ -1,4 +1,4 @@
-module github.com/yourorg/list-to-map
+module github.com/scottrigby/helm-list-to-map-plugin
 
 go 1.24.0
 
