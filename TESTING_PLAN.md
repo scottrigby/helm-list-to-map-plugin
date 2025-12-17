@@ -1037,13 +1037,21 @@ test-update-golden:
 
 ### Remaining Work
 
-**Future (when features implemented):**
+**Subchart Dependency Tests (features implemented, tests needed):**
 
-1. `--include-charts-dir` tests - Embedded subchart detection
-2. `--expand-remote` tests - Tarball expansion
-3. Multiple values files (`-f`/`--values`) tests - See below
+Unit tests exist for helper functions (`scanChartsDirectory`, `scanChartsTarballs`, `collectSubcharts`), but integration tests with real chart fixtures are needed:
 
-**Optional enhancements:** `pkg/k8s/*_test.go` - K8s type introspection, `pkg/parser/*_test.go` - Template parsing (code examples in Phase 2.1 and 2.3 below)
+1. **`--include-charts-dir` integration tests** - Chart with embedded charts/ subdirectories
+2. **`--expand-remote` integration tests** - Chart with .tgz file (requires creating test tarball)
+3. **Deduplication tests** - Chart with overlapping file:// dep and charts/ directory
+4. **Multi-level nesting** - Umbrella → subchart → nested-subchart (two levels deep)
+
+See "Subchart Dependency Test Fixtures" section below for detailed specifications.
+
+**Other future tests:**
+
+1. Multiple values files (`-f`/`--values`) tests - See below
+2. **Optional enhancements:** `pkg/k8s/*_test.go` - K8s type introspection, `pkg/parser/*_test.go` - Template parsing (code examples in Phase 2.1 and 2.3 below)
 
 ## Notes
 
@@ -1088,6 +1096,311 @@ The `transformSingleItemWithIndent` function uses the parent key's column positi
 2. Arrays with items indented under parent key (standard style)
 3. Deeply nested arrays with various indentation styles
 4. Mixed indentation within the same values.yaml file
+
+### Subchart Dependency Test Fixtures
+
+**Status:** Unit tests complete (helper functions), integration tests needed
+
+The plugin now supports three flags for subchart processing. Integration test fixtures are needed:
+
+#### 1. Chart with Embedded Subcharts (--include-charts-dir)
+
+**Fixture:** `cmd/testdata/charts/with-embedded-subcharts/`
+
+```
+with-embedded-subcharts/
+├── Chart.yaml (no dependencies declared)
+├── values.yaml (references subchart values)
+├── charts/
+│   ├── embedded-a/
+│   │   ├── Chart.yaml
+│   │   ├── values.yaml (arrays to convert)
+│   │   └── templates/deployment.yaml
+│   └── embedded-b/
+│       ├── Chart.yaml
+│       ├── values.yaml (arrays to convert)
+│       └── templates/deployment.yaml
+└── templates/deployment.yaml
+```
+
+**Test cases:**
+
+- Detect with --include-charts-dir finds both embedded subcharts
+- Convert with --include-charts-dir processes both subcharts
+- Umbrella values.yaml updated with converted paths
+
+#### 2. Chart with Tarball Dependencies (--expand-remote)
+
+**Fixture:** `cmd/testdata/charts/with-tarball/`
+
+```
+with-tarball/
+├── Chart.yaml
+├── values.yaml (references subchart values)
+├── charts/
+│   └── remote-chart-1.0.0.tgz (pre-packaged minimal chart)
+└── templates/deployment.yaml
+```
+
+**Test cases:**
+
+- Detect with --expand-remote extracts and detects
+- Convert with --expand-remote extracts, converts, creates backup
+- Verify .tgz.bak created
+- Verify warning message displayed
+- Test: tarball with Chart.yaml containing annotations/sources for repo URL
+
+**Creating test tarball:**
+
+```bash
+# Create minimal chart, package it
+tar czf remote-chart-1.0.0.tgz remote-chart/
+```
+
+#### 3. Deduplication Test (file:// pointing to charts/)
+
+**Fixture:** `cmd/testdata/charts/deduplication/`
+
+```
+deduplication/
+├── Chart.yaml (dependency: file://./charts/shared)
+├── values.yaml
+├── charts/
+│   └── shared/
+│       ├── Chart.yaml
+│       ├── values.yaml (arrays to convert)
+│       └── templates/deployment.yaml
+└── templates/deployment.yaml
+```
+
+**Test cases:**
+
+- With --recursive only: processes charts/shared once
+- With --include-charts-dir only: processes charts/shared once
+- With both flags: still processes charts/shared only once (deduplication)
+- Source marked as "charts/ (via Chart.yaml)" when deduplicated
+
+#### 4. All Dependency Types Combined
+
+**Fixture:** `cmd/testdata/charts/all-deps/`
+
+```
+all-deps/
+├── Chart.yaml (dependency: file://../sibling-chart)
+├── values.yaml
+├── charts/
+│   ├── embedded/
+│   │   ├── Chart.yaml
+│   │   └── ...
+│   └── remote-1.0.0.tgz
+├── sibling-chart/ (outside charts/, referenced via file://)
+│   ├── Chart.yaml
+│   └── ...
+└── templates/deployment.yaml
+```
+
+**Test cases:**
+
+- All three flags together process all three dependency types
+- Each type converted correctly
+- No duplicates
+- Appropriate warnings for expanded remote
+
+#### 5. Multi-Level Nesting
+
+**Fixture:** `cmd/testdata/charts/nested-umbrella/`
+
+```
+nested-umbrella/
+├── Chart.yaml (dep: file://./level1)
+├── values.yaml
+├── level1/
+│   ├── Chart.yaml (dep: file://./level2)
+│   ├── values.yaml
+│   ├── level2/
+│   │   ├── Chart.yaml
+│   │   ├── values.yaml (arrays to convert)
+│   │   └── templates/deployment.yaml
+│   └── templates/deployment.yaml
+└── templates/deployment.yaml
+```
+
+**Test cases:**
+
+- Recursive processes level1 only (not level2 - that's level1's subchart)
+- To convert nested-umbrella fully, must run recursively on level1 separately
+- Document this limitation (or implement deep recursion if desired)
+
+### Subchart Dependency Test Matrix
+
+To ensure comprehensive coverage of all subchart/dependency type combinations, the following matrix defines test scenarios:
+
+#### Dependency Type Legend
+
+| Code | Type    | Description                                                             |
+| ---- | ------- | ----------------------------------------------------------------------- |
+| F    | file:// | Dependency declared in Chart.yaml with `repository: file://...`         |
+| C    | charts/ | Directory in charts/ containing Chart.yaml (not declared in Chart.yaml) |
+| T    | tarball | .tgz file in charts/ directory                                          |
+
+#### Single Type Tests (Level 1 - No Nesting)
+
+| Test ID | Types | Flags                | Description                      |
+| ------- | ----- | -------------------- | -------------------------------- |
+| S1-F    | F     | --recursive          | Single file:// dependency        |
+| S1-C    | C     | --include-charts-dir | Single embedded chart in charts/ |
+| S1-T    | T     | --expand-remote      | Single tarball in charts/        |
+
+#### Two-Type Mix Tests (Level 1 - No Nesting)
+
+| Test ID | Types | Flags                                | Description              |
+| ------- | ----- | ------------------------------------ | ------------------------ |
+| M2-FC   | F+C   | --recursive --include-charts-dir     | file:// + embedded chart |
+| M2-FT   | F+T   | --recursive --expand-remote          | file:// + tarball        |
+| M2-CT   | C+T   | --include-charts-dir --expand-remote | embedded chart + tarball |
+
+#### Three-Type Mix Test (Level 1 - No Nesting)
+
+| Test ID | Types | Flags                                            | Description              |
+| ------- | ----- | ------------------------------------------------ | ------------------------ |
+| M3-FCT  | F+C+T | --recursive --include-charts-dir --expand-remote | All three types together |
+
+#### Deduplication Tests
+
+| Test ID | Types | Flags                            | Description                                   |
+| ------- | ----- | -------------------------------- | --------------------------------------------- |
+| D-FC    | F→C   | --recursive --include-charts-dir | file:// points to charts/ subdir (same chart) |
+
+#### Nested Mix Tests (Level 2 - One Level of Nesting)
+
+These tests verify that subcharts can themselves have subcharts of different types:
+
+| Test ID | Parent Type | Child Types | Flags                                       | Description                                  |
+| ------- | ----------- | ----------- | ------------------------------------------- | -------------------------------------------- |
+| N2-F-F  | F           | F           | --recursive                                 | file:// → file://                            |
+| N2-F-C  | F           | C           | --recursive + subchart --include-charts-dir | file:// → embedded                           |
+| N2-F-T  | F           | T           | --recursive + subchart --expand-remote      | file:// → tarball                            |
+| N2-C-F  | C           | F           | --include-charts-dir                        | charts/ → file:// (needs recursive on child) |
+| N2-C-C  | C           | C           | --include-charts-dir                        | charts/ → charts/                            |
+| N2-C-T  | C           | T           | --include-charts-dir                        | charts/ → tarball                            |
+
+**Note:** Current implementation processes one level. For nested scenarios, run the tool recursively on each level or implement deep recursion.
+
+#### Three-Level Nesting Tests (Advanced)
+
+| Test ID | L1 Type | L2 Type | L3 Type | Description                 |
+| ------- | ------- | ------- | ------- | --------------------------- |
+| N3-FFF  | F       | F       | F       | file:// → file:// → file:// |
+| N3-FCT  | F       | C       | T       | file:// → charts/ → tarball |
+| N3-CFT  | C       | F       | T       | charts/ → file:// → tarball |
+| N3-MIX  | F+C     | F+T     | C       | Mixed at each level         |
+
+#### Test Matrix Implementation Status
+
+**Fixture:** `cmd/testdata/charts/matrix/`
+
+```
+matrix/
+├── single-types/
+│   ├── s1-file/           # S1-F: Single file:// dependency
+│   │   ├── Chart.yaml     # dependency: file://../sibling
+│   │   └── sibling/       # Sibling chart (file:// target)
+│   ├── s1-charts/         # S1-C: Single embedded chart
+│   │   └── charts/embedded/
+│   └── s1-tarball/        # S1-T: Single tarball
+│       └── charts/remote-1.0.0.tgz
+├── two-type-mix/
+│   ├── m2-file-charts/    # M2-FC: file:// + charts/ dir
+│   │   ├── Chart.yaml     # dependency: file://../sibling
+│   │   ├── sibling/
+│   │   └── charts/embedded/
+│   ├── m2-file-tarball/   # M2-FT: file:// + tarball
+│   │   ├── Chart.yaml     # dependency: file://../sibling
+│   │   ├── sibling/
+│   │   └── charts/remote-1.0.0.tgz
+│   └── m2-charts-tarball/ # M2-CT: charts/ dir + tarball
+│       └── charts/
+│           ├── embedded/
+│           └── remote-1.0.0.tgz
+├── three-type-mix/
+│   └── m3-all/            # M3-FCT: All three types
+│       ├── Chart.yaml     # dependency: file://../sibling
+│       ├── sibling/
+│       └── charts/
+│           ├── embedded/
+│           └── remote-1.0.0.tgz
+├── deduplication/
+│   └── d-file-to-charts/  # D-FC: file:// points to charts/
+│       ├── Chart.yaml     # dependency: file://./charts/shared
+│       └── charts/shared/
+└── nested/
+    ├── n2-file-file/      # N2-F-F: file:// → file://
+    │   ├── Chart.yaml     # dependency: file://./level1
+    │   └── level1/        # Contains file:// dep to level2
+    │       ├── Chart.yaml # dependency: file://./level2
+    │       └── level2/
+    ├── n2-file-charts/    # N2-F-C: file:// → charts/
+    │   ├── Chart.yaml     # dependency: file://./level1
+    │   └── level1/
+    │       └── charts/embedded/
+    └── n3-mixed/          # N3-MIX: Three levels, mixed types
+        ├── Chart.yaml     # deps: file://./l1a, plus charts/l1b
+        ├── l1a/           # Contains tarball
+        │   └── charts/remote-1.0.0.tgz
+        ├── charts/
+        │   └── l1b/       # Contains file:// dep
+        │       ├── Chart.yaml # dep: file://./l2
+        │       └── l2/
+        └── ...
+```
+
+#### Expected Test Results
+
+| Test ID | Charts Processed | Dedup Expected | Warning Expected |
+| ------- | ---------------- | -------------- | ---------------- |
+| S1-F    | 1                | No             | No               |
+| S1-C    | 1                | No             | No               |
+| S1-T    | 1                | No             | Yes (remote)     |
+| M2-FC   | 2                | No             | No               |
+| M2-FT   | 2                | No             | Yes (remote)     |
+| M2-CT   | 2                | No             | Yes (remote)     |
+| M3-FCT  | 3                | No             | Yes (remote)     |
+| D-FC    | 1                | Yes            | No               |
+| N2-F-F  | 2                | No             | No               |
+| N2-F-C  | 2                | No             | No               |
+| N3-MIX  | 4+               | Possibly       | Yes (if tarball) |
+
+#### Test Implementation Checklist
+
+**Single Types:**
+
+- [ ] S1-F: Single file:// (fixture + test)
+- [ ] S1-C: Single charts/ (fixture + test)
+- [ ] S1-T: Single tarball (fixture + test)
+
+**Two-Type Mixes:**
+
+- [ ] M2-FC: file:// + charts/ (fixture + test)
+- [ ] M2-FT: file:// + tarball (fixture + test)
+- [ ] M2-CT: charts/ + tarball (fixture + test)
+
+**Three-Type Mix:**
+
+- [ ] M3-FCT: All three types (fixture + test)
+
+**Deduplication:**
+
+- [ ] D-FC: file:// to charts/ (fixture + test)
+
+**Nested (Level 2):**
+
+- [ ] N2-F-F: file:// → file:// (fixture + test)
+- [ ] N2-F-C: file:// → charts/ (fixture + test)
+- [ ] N2-F-T: file:// → tarball (fixture + test)
+
+**Nested (Level 3 - Optional):**
+
+- [ ] N3-MIX: Three-level mixed types (fixture + test)
 
 ### Multiple Values Files Tests
 

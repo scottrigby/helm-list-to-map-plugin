@@ -19,7 +19,7 @@ func runConvert(opts ConvertOptions) error {
 	}
 
 	// Handle recursive conversion of umbrella charts
-	if opts.Recursive {
+	if opts.Recursive || opts.IncludeChartsDir || opts.ExpandRemote {
 		return runRecursiveConvert(root, opts)
 	}
 
@@ -419,44 +419,54 @@ func updateUmbrellaValues(umbrellaRoot string, conversions []SubchartConversion,
 // runRecursiveConvert handles the --recursive flag for umbrella charts
 // It converts all file:// subcharts and then updates the umbrella values.yaml
 func runRecursiveConvert(umbrellaRoot string, opts ConvertOptions) error {
-	fmt.Printf("Recursive conversion for umbrella chart: %s\n", umbrellaRoot)
+	fmt.Printf("Subchart conversion for umbrella chart: %s\n", umbrellaRoot)
 
-	// Parse Chart.yaml to find file:// dependencies
-	deps, err := parseChartDependencies(umbrellaRoot)
+	// Collect subcharts based on flags
+	subcharts, err := collectSubcharts(umbrellaRoot, opts.Recursive, opts.IncludeChartsDir, opts.ExpandRemote)
 	if err != nil {
-		return fmt.Errorf("parsing dependencies: %w", err)
+		return fmt.Errorf("collecting subcharts: %w", err)
 	}
 
-	if len(deps) == 0 {
-		fmt.Println("No file:// dependencies found in Chart.yaml.")
-		fmt.Println("Use --recursive only for umbrella charts with local subcharts.")
+	if len(subcharts) == 0 {
+		fmt.Println("\nNo subcharts found.")
+		if !opts.Recursive && !opts.IncludeChartsDir && !opts.ExpandRemote {
+			fmt.Println("Use --recursive, --include-charts-dir, or --expand-remote to process subcharts.")
+		}
 		return nil
 	}
 
-	fmt.Printf("\nFound %d file:// subchart(s):\n", len(deps))
-	for _, dep := range deps {
-		fmt.Printf("  - %s (%s)\n", dep.Name, dep.Repository)
+	fmt.Printf("\nFound %d subchart(s):\n", len(subcharts))
+	for _, sub := range subcharts {
+		fmt.Printf("  - %s [%s]\n", sub.Name, sub.Source)
 	}
 
 	// Convert each subchart
 	var conversions []SubchartConversion
-	for _, dep := range deps {
-		subchartPath := resolveSubchartPath(umbrellaRoot, dep.Repository)
+	var expandedCharts []SubchartInfo
 
+	for _, sub := range subcharts {
 		// Check if subchart exists
-		if _, err := os.Stat(filepath.Join(subchartPath, "Chart.yaml")); err != nil {
-			fmt.Fprintf(os.Stderr, "\nWarning: Subchart %s not found at %s, skipping\n", dep.Name, subchartPath)
+		if _, err := os.Stat(filepath.Join(sub.Path, "Chart.yaml")); err != nil {
+			fmt.Fprintf(os.Stderr, "\nWarning: Subchart %s not found at %s, skipping\n", sub.Name, sub.Path)
 			continue
 		}
 
-		fmt.Printf("\n=== Converting subchart: %s ===\n", dep.Name)
-		fmt.Printf("  Path: %s\n", subchartPath)
+		fmt.Printf("\n=== Converting subchart: %s [%s] ===\n", sub.Name, sub.Source)
+		fmt.Printf("  Path: %s\n", sub.Path)
 
-		conv, err := convertSubchartAndTrack(subchartPath, opts)
+		// Track expanded charts for warning
+		if sub.WasExpanded {
+			expandedCharts = append(expandedCharts, sub)
+		}
+
+		conv, err := convertSubchartAndTrack(sub.Path, opts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  Error: %v\n", err)
 			continue
 		}
+
+		// Update conversion record with subchart name
+		conv.Name = sub.Name
 
 		if len(conv.ConvertedPaths) == 0 {
 			fmt.Println("  No conversions needed")
@@ -467,6 +477,11 @@ func runRecursiveConvert(umbrellaRoot string, opts ConvertOptions) error {
 			}
 			conversions = append(conversions, *conv)
 		}
+	}
+
+	// Display warning for expanded remote dependencies
+	if len(expandedCharts) > 0 {
+		displayRemoteWarning(expandedCharts)
 	}
 
 	// Update umbrella values.yaml with converted subchart paths

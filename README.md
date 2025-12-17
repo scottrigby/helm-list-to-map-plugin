@@ -92,6 +92,53 @@ make build
 helm plugin install .
 ```
 
+## Umbrella Charts & Subcharts
+
+The plugin supports processing subcharts in umbrella/parent charts using three flags:
+
+### Subchart Processing Flags
+
+| Flag                   | Processes                            | Use Case                                   |
+| ---------------------- | ------------------------------------ | ------------------------------------------ |
+| `--recursive`          | file:// dependencies from Chart.yaml | Umbrella charts with local subcharts       |
+| `--include-charts-dir` | Directories in charts/               | Vendored/embedded subcharts                |
+| `--expand-remote`      | .tgz files in charts/                | Remote dependencies (**use with caution**) |
+
+### Flag Behavior
+
+| Dependency Type       | Default | --recursive | --include-charts-dir | --expand-remote     |
+| --------------------- | ------- | ----------- | -------------------- | ------------------- |
+| file:// in Chart.yaml | Skip    | ✓ Convert   | Skip                 | Skip                |
+| Directory in charts/  | Skip    | Skip        | ✓ Convert            | Skip                |
+| .tgz in charts/       | Skip    | Skip        | Skip                 | ✓ Extract & convert |
+
+**Combining flags:** Use multiple flags together to process different dependency types in one run. Deduplication automatically handles charts that appear in multiple ways.
+
+### Examples
+
+```bash
+# Process file:// dependencies from Chart.yaml
+helm list-to-map convert --chart ./umbrella --recursive
+
+# Process embedded subcharts in charts/ directory
+helm list-to-map convert --chart ./umbrella --include-charts-dir
+
+# Process all types (file://, charts/ dirs, and .tgz files)
+helm list-to-map convert --chart ./umbrella --recursive --include-charts-dir --expand-remote
+```
+
+### Important: --expand-remote Warning
+
+The `--expand-remote` flag extracts .tgz files from charts/ and converts them. **These changes will be lost** when you run `helm dependency update`.
+
+Recommended workflow for remote dependencies:
+
+1. Convert at the source repository (if you own it)
+2. File an issue requesting map-based values (for community charts)
+3. Fork the chart and use `file://` dependency (if neither option works)
+
+Backups are created as `<tarball>.tgz.bak` before extraction.
+
 ## Limitations
 
 ### Environment Variable Ordering
@@ -175,11 +222,13 @@ Usage:
   helm list-to-map detect [flags]
 
 Flags:
-      --chart string    path to chart root (default: current directory)
-      --config string   path to user config (default: $HELM_CONFIG_HOME/list-to-map/config.yaml)
-  -h, --help            help for detect
-      --recursive       recursively detect in file:// subcharts (for umbrella charts)
-  -v                    verbose output (show template files, partials, and warnings)
+      --chart string         path to chart root (default: current directory)
+      --config string        path to user config (default: $HELM_CONFIG_HOME/list-to-map/config.yaml)
+      --expand-remote        expand and process .tgz files in charts/
+  -h, --help                 help for detect
+      --include-charts-dir   include subcharts in charts/ directory
+      --recursive            recursively detect in file:// subcharts (for umbrella charts)
+  -v                         verbose output (show template files, partials, and warnings)
 
 Examples:
   # Detect convertible fields in a chart
@@ -194,6 +243,12 @@ Examples:
 
   # Detect in umbrella chart and all file:// subcharts
   helm list-to-map detect --chart ./umbrella-chart --recursive
+
+  # Detect in umbrella chart including embedded charts/ subcharts
+  helm list-to-map detect --chart ./umbrella-chart --include-charts-dir
+
+  # Process all dependency types (file://, charts/ dirs, .tgz files)
+  helm list-to-map detect --chart ./umbrella-chart --recursive --include-charts-dir --expand-remote
 ```
 
 ### `helm list-to-map convert`
@@ -219,12 +274,14 @@ Usage:
   helm list-to-map convert [flags]
 
 Flags:
-      --backup-ext string   backup file extension (default: ".bak")
-      --chart string        path to chart root (default: current directory)
-      --config string       path to user config (default: $HELM_CONFIG_HOME/list-to-map/config.yaml)
-      --dry-run             preview changes without writing files
-  -h, --help                help for convert
-      --recursive           recursively convert file:// subcharts and update umbrella values
+      --backup-ext string    backup file extension (default: ".bak")
+      --chart string         path to chart root (default: current directory)
+      --config string        path to user config (default: $HELM_CONFIG_HOME/list-to-map/config.yaml)
+      --dry-run              preview changes without writing files
+      --expand-remote        expand and process .tgz files in charts/
+  -h, --help                 help for convert
+      --include-charts-dir   include subcharts in charts/ directory
+      --recursive            recursively convert file:// subcharts and update umbrella values
 
 Examples:
   # Convert a chart with built-in K8s types
@@ -239,6 +296,12 @@ Examples:
 
   # Convert umbrella chart and all file:// subcharts recursively
   helm list-to-map convert --chart ./umbrella-chart --recursive
+
+  # Convert including embedded charts/ subcharts
+  helm list-to-map convert --chart ./umbrella-chart --include-charts-dir
+
+  # Convert all dependency types (use with caution for --expand-remote)
+  helm list-to-map convert --chart ./umbrella-chart --recursive --include-charts-dir --expand-remote
 ```
 
 ### `helm list-to-map load-crd`

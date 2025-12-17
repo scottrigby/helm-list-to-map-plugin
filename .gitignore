@@ -5,3 +5,7 @@ CLAUDE.md
 # Test coverage
 coverage.out
 coverage.html
+
+# Backup files
+*.bak
+*.tgz.bak

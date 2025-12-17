@@ -245,17 +245,27 @@ judge-api:
 
 The plugin tracks converted paths per subchart and automatically applies matching updates to the umbrella.
 
-### Limitations
+### Subchart Processing Flags
 
-Current limitations of umbrella chart support:
+The plugin provides three flags for processing different types of subcharts:
 
-| Limitation                      | Status                                                                  | Workaround                          |
-| ------------------------------- | ----------------------------------------------------------------------- | ----------------------------------- |
-| Remote dependencies             | Not supported                                                           | Convert at source, or use `file://` |
-| Embedded subcharts in `charts/` | Planned ([Phase 2](ROADMAP.md#phase-2-include-charts-dir-flag-planned)) | Use `convert` directly on subchart  |
-| Tarballs in `charts/`           | Planned ([Phase 3](ROADMAP.md#phase-3-expand-remote-flag-planned))      | Extract manually, then convert      |
+| Flag                   | Processes                            | Use Case                             |
+| ---------------------- | ------------------------------------ | ------------------------------------ |
+| `--recursive`          | file:// dependencies from Chart.yaml | Umbrella charts with local subcharts |
+| `--include-charts-dir` | Directories in charts/               | Vendored/embedded subcharts          |
+| `--expand-remote`      | .tgz files in charts/                | Remote dependencies (with warnings)  |
 
-See [DEPENDENCY-HANDLING-PLAN.md](docs/DEPENDENCY-HANDLING-PLAN.md) for the full roadmap.
+**Decision Matrix:**
+
+| Dependency Type       | Default | --recursive | --include-charts-dir | --expand-remote     |
+| --------------------- | ------- | ----------- | -------------------- | ------------------- |
+| file:// in Chart.yaml | Skip    | ✓ Convert   | Skip                 | Skip                |
+| Directory in charts/  | Skip    | Skip        | ✓ Convert            | Skip                |
+| .tgz in charts/       | Skip    | Skip        | Skip                 | ✓ Extract & convert |
+
+Flags can be combined. Deduplication handles overlaps (e.g., file:// pointing to charts/ directory).
+
+**Important:** Changes to --expand-remote dependencies are lost on `helm dependency update`. See [ROADMAP.md](ROADMAP.md#future-enhancements-dependency-handling) for future improvements.
 
 ## CRD Schema Parsing
 

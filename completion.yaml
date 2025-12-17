@@ -4,6 +4,9 @@ commands:
     flags:
       - chart
       - config
+      - recursive
+      - include-charts-dir
+      - expand-remote
       - h
       - help
       - v
@@ -13,6 +16,9 @@ commands:
       - config
       - dry-run
       - backup-ext
+      - recursive
+      - include-charts-dir
+      - expand-remote
       - h
       - help
   - name: load-crd

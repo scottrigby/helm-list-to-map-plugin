@@ -41,6 +41,8 @@ type ChartDependency struct {
 // ChartYAML represents the relevant parts of Chart.yaml
 type ChartYAML struct {
 	Dependencies []ChartDependency `yaml:"dependencies"`
+	Annotations  map[string]string `yaml:"annotations,omitempty"`
+	Sources      []string          `yaml:"sources,omitempty"`
 }
 
 // Global config loaded from user config file
@@ -157,21 +159,48 @@ func runDetectCommand() error {
 	fs.StringVar(&opts.ConfigPath, "config", "", "path to user config")
 	fs.BoolVar(&opts.Verbose, "v", false, "verbose output")
 	fs.BoolVar(&opts.Recursive, "recursive", false, "recursively detect in file:// subcharts")
+	fs.BoolVar(&opts.IncludeChartsDir, "include-charts-dir", false, "include subcharts in charts/ directory")
+	fs.BoolVar(&opts.ExpandRemote, "expand-remote", false, "expand and process .tgz files in charts/")
 	fs.Usage = func() {
 		fmt.Print(`
 Scan a Helm chart to detect arrays that can be converted to maps based on
 unique key fields. This is a read-only operation that reports potential conversions
 without modifying any files.
 
+Built-in Kubernetes types (Deployment, Pod, Service, etc.) are detected automatically.
+For Custom Resources (CRs), first load their CRD definitions using 'helm list-to-map load-crd'.
+
 Usage:
   helm list-to-map detect [flags]
 
 Flags:
-      --chart string    path to chart root (default: current directory)
-      --config string   path to user config
-  -h, --help            help for detect
-      --recursive       recursively detect in file:// subcharts
-  -v                    verbose output
+      --chart string         path to chart root (default: current directory)
+      --config string        path to user config (default: $HELM_CONFIG_HOME/list-to-map/config.yaml)
+      --expand-remote        expand and process .tgz files in charts/
+  -h, --help                 help for detect
+      --include-charts-dir   include subcharts in charts/ directory
+      --recursive            recursively detect in file:// subcharts (for umbrella charts)
+  -v                         verbose output (show template files, partials, and warnings)
+
+Examples:
+  # Detect convertible fields in a chart
+  helm list-to-map detect --chart ./my-chart
+
+  # First load CRDs for Custom Resources, then detect
+  helm list-to-map load-crd https://raw.githubusercontent.com/.../alertmanager-crd.yaml
+  helm list-to-map detect --chart ./my-chart
+
+  # Verbose output to see warnings and partial templates
+  helm list-to-map detect --chart ./my-chart -v
+
+  # Detect in umbrella chart and all file:// subcharts
+  helm list-to-map detect --chart ./umbrella-chart --recursive
+
+  # Detect in umbrella chart including embedded charts/ subcharts
+  helm list-to-map detect --chart ./umbrella-chart --include-charts-dir
+
+  # Process all dependency types (file://, charts/ dirs, .tgz files)
+  helm list-to-map detect --chart ./umbrella-chart --recursive --include-charts-dir --expand-remote
 `)
 	}
 	_ = fs.Parse(os.Args[2:])
@@ -186,21 +215,56 @@ func runConvertCommand() error {
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "preview changes without writing files")
 	fs.StringVar(&opts.BackupExt, "backup-ext", ".bak", "backup file extension")
 	fs.BoolVar(&opts.Recursive, "recursive", false, "recursively convert file:// subcharts")
+	fs.BoolVar(&opts.IncludeChartsDir, "include-charts-dir", false, "include subcharts in charts/ directory")
+	fs.BoolVar(&opts.ExpandRemote, "expand-remote", false, "expand and process .tgz files in charts/")
 	fs.Usage = func() {
 		fmt.Print(`
 Transform array-based configurations to map-based configurations in values.yaml
-and automatically update corresponding template files.
+and automatically update corresponding template files. This command modifies files
+in place, creating backups with the specified extension.
+
+The conversion process:
+  1. Scans templates using K8s API introspection and CRD schemas
+  2. Identifies list fields with required unique keys (patchMergeKey or x-kubernetes-list-map-keys)
+  3. Converts matching arrays to maps using unique key fields
+  4. Updates template files to use new helper functions
+  5. Generates helper templates if they don't exist
+
+Built-in Kubernetes types are detected automatically. For Custom Resources (CRs),
+first load their CRD definitions using 'helm list-to-map load-crd'.
 
 Usage:
   helm list-to-map convert [flags]
 
 Flags:
-      --backup-ext string   backup file extension (default: ".bak")
-      --chart string        path to chart root (default: current directory)
-      --config string       path to user config
-      --dry-run             preview changes without writing files
-  -h, --help                help for convert
-      --recursive           recursively convert file:// subcharts
+      --backup-ext string    backup file extension (default: ".bak")
+      --chart string         path to chart root (default: current directory)
+      --config string        path to user config (default: $HELM_CONFIG_HOME/list-to-map/config.yaml)
+      --dry-run              preview changes without writing files
+      --expand-remote        expand and process .tgz files in charts/
+  -h, --help                 help for convert
+      --include-charts-dir   include subcharts in charts/ directory
+      --recursive            recursively convert file:// subcharts and update umbrella values
+
+Examples:
+  # Convert a chart with built-in K8s types
+  helm list-to-map convert --chart ./my-chart
+
+  # First load CRDs for Custom Resources, then convert
+  helm list-to-map load-crd https://raw.githubusercontent.com/.../alertmanager-crd.yaml
+  helm list-to-map convert --chart ./my-chart
+
+  # Preview changes without modifying files
+  helm list-to-map convert --dry-run
+
+  # Convert umbrella chart and all file:// subcharts recursively
+  helm list-to-map convert --chart ./umbrella-chart --recursive
+
+  # Convert including embedded charts/ subcharts
+  helm list-to-map convert --chart ./umbrella-chart --include-charts-dir
+
+  # Convert all dependency types (use with caution for --expand-remote)
+  helm list-to-map convert --chart ./umbrella-chart --recursive --include-charts-dir --expand-remote
 `)
 	}
 	_ = fs.Parse(os.Args[2:])
@@ -215,16 +279,43 @@ func runLoadCRDCommand() error {
 	fs.Usage = func() {
 		fmt.Print(`
 Load CRD (Custom Resource Definition) files to enable detection of convertible
-fields in Custom Resources.
+fields in Custom Resources. CRDs are stored in the plugin's config directory
+and automatically loaded when running 'detect' or 'convert'.
+
+The plugin extracts x-kubernetes-list-type and x-kubernetes-list-map-keys
+annotations from the CRD's OpenAPI schema to identify convertible list fields.
+
+CRD files are named using the pattern {group}_{plural}_{storageVersion}.yaml,
+so different storage versions of the same CRD coexist without overwriting.
+Existing files are preserved unless --force is used.
 
 Usage:
   helm list-to-map load-crd [flags] <source> [source...]
   helm list-to-map load-crd --common
 
+Arguments:
+  source    CRD file path, directory, or URL (can specify multiple)
+
 Flags:
-      --common  load CRDs from bundled crd-sources.yaml
-      --force   overwrite existing CRD files
+      --common  load CRDs from bundled crd-sources.yaml (uses 'main' branch)
+      --force   overwrite existing CRD files with same storage version
   -h, --help    help for load-crd
+
+Examples:
+  # Load CRD from a local file
+  helm list-to-map load-crd ./alertmanager-crd.yaml
+
+  # Load CRD from a URL
+  helm list-to-map load-crd https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/example/prometheus-operator-crd/monitoring.coreos.com_alertmanagers.yaml
+
+  # Load all CRDs from a directory (recursively)
+  helm list-to-map load-crd ./my-chart/crds/
+
+  # Load bundled common CRDs (from crd-sources.yaml)
+  helm list-to-map load-crd --common
+
+  # Force overwrite existing CRDs
+  helm list-to-map load-crd --force ./crds/
 `)
 	}
 	_ = fs.Parse(os.Args[2:])
@@ -245,7 +336,7 @@ Usage:
 
 Flags:
   -h, --help   help for list-crds
-  -v           verbose
+  -v           verbose - show all convertible fields for each CRD
 `)
 	}
 	_ = fs.Parse(os.Args[2:])
@@ -262,14 +353,23 @@ func runAddRuleCommand() error {
 		fmt.Print(`
 Add a custom conversion rule to your user configuration file.
 
+Use this for:
+  - CRDs that don't define x-kubernetes-list-map-keys in their OpenAPI schema
+  - Custom resources without available CRD definitions
+  - Any list field you want to convert that isn't auto-detected
+
 Usage:
   helm list-to-map add-rule [flags]
 
 Flags:
-      --config string      path to user config
+      --config string      path to user config (default: $HELM_CONFIG_HOME/list-to-map/config.yaml)
   -h, --help               help for add-rule
-      --path string        dot path to array (end with [])
-      --uniqueKey string   unique key field
+      --path string        dot path to array (end with []), e.g. database.primary.extraEnv[]
+      --uniqueKey string   unique key field, e.g. name
+
+Examples:
+  helm list-to-map add-rule --path='istio.virtualService.http[]' --uniqueKey=name
+  helm list-to-map add-rule --path='myapp.listeners[]' --uniqueKey=port
 `)
 	}
 	_ = fs.Parse(os.Args[2:])
@@ -281,6 +381,9 @@ func runListRulesCommand() error {
 	fs.Usage = func() {
 		fmt.Print(`
 List custom conversion rules for CRDs and custom resources.
+
+Note: Built-in K8s types are detected automatically via API introspection
+and do not require rules. Use 'detect' to see what will be converted.
 
 Usage:
   helm list-to-map rules [flags]

@@ -20,8 +20,8 @@ func runDetect(opts DetectOptions) error {
 	}
 
 	// Handle recursive detection for umbrella charts
-	if opts.Recursive {
-		return runRecursiveDetect(root, opts.Verbose)
+	if opts.Recursive || opts.IncludeChartsDir || opts.ExpandRemote {
+		return runRecursiveDetect(root, opts)
 	}
 
 	// Load CRDs from plugin config directory
@@ -480,26 +480,28 @@ func scanForUserRules(chartRoot string) []k8s.DetectedCandidate {
 	return detected
 }
 
-// runRecursiveDetect handles the --recursive flag for detect command
-// It detects convertible paths in all file:// subcharts
-func runRecursiveDetect(umbrellaRoot string, verbose bool) error {
-	fmt.Printf("Recursive detection for umbrella chart: %s\n", umbrellaRoot)
+// runRecursiveDetect handles subchart detection (--recursive, --include-charts-dir, --expand-remote)
+// It detects convertible paths in all collected subcharts
+func runRecursiveDetect(umbrellaRoot string, opts DetectOptions) error {
+	fmt.Printf("Subchart detection for umbrella chart: %s\n", umbrellaRoot)
 
-	// Parse Chart.yaml to find file:// dependencies
-	deps, err := parseChartDependencies(umbrellaRoot)
+	// Collect subcharts based on flags
+	subcharts, err := collectSubcharts(umbrellaRoot, opts.Recursive, opts.IncludeChartsDir, opts.ExpandRemote)
 	if err != nil {
-		return fmt.Errorf("parsing dependencies: %w", err)
+		return fmt.Errorf("collecting subcharts: %w", err)
 	}
 
-	if len(deps) == 0 {
-		fmt.Println("No file:// dependencies found in Chart.yaml.")
-		fmt.Println("Use --recursive only for umbrella charts with local subcharts.")
+	if len(subcharts) == 0 {
+		fmt.Println("\nNo subcharts found.")
+		if !opts.Recursive && !opts.IncludeChartsDir && !opts.ExpandRemote {
+			fmt.Println("Use --recursive, --include-charts-dir, or --expand-remote to process subcharts.")
+		}
 		return nil
 	}
 
-	fmt.Printf("\nFound %d file:// subchart(s):\n", len(deps))
-	for _, dep := range deps {
-		fmt.Printf("  - %s (%s)\n", dep.Name, dep.Repository)
+	fmt.Printf("\nFound %d subchart(s):\n", len(subcharts))
+	for _, sub := range subcharts {
+		fmt.Printf("  - %s [%s]\n", sub.Name, sub.Source)
 	}
 
 	// Load CRDs from plugin config directory
@@ -510,26 +512,31 @@ func runRecursiveDetect(umbrellaRoot string, verbose bool) error {
 	// Detect in each subchart
 	totalDetected := 0
 	totalSkipped := 0
-	for _, dep := range deps {
-		subchartPath := resolveSubchartPath(umbrellaRoot, dep.Repository)
+	var expandedCharts []SubchartInfo
 
+	for _, sub := range subcharts {
 		// Check if subchart exists
-		if _, err := os.Stat(filepath.Join(subchartPath, "Chart.yaml")); err != nil {
-			fmt.Fprintf(os.Stderr, "\nWarning: Subchart %s not found at %s, skipping\n", dep.Name, subchartPath)
+		if _, err := os.Stat(filepath.Join(sub.Path, "Chart.yaml")); err != nil {
+			fmt.Fprintf(os.Stderr, "\nWarning: Subchart %s not found at %s, skipping\n", sub.Name, sub.Path)
 			continue
 		}
 
-		fmt.Printf("\n=== Subchart: %s ===\n", dep.Name)
+		fmt.Printf("\n=== Subchart: %s [%s] ===\n", sub.Name, sub.Source)
+
+		// Track expanded charts for warning
+		if sub.WasExpanded {
+			expandedCharts = append(expandedCharts, sub)
+		}
 
 		// Detect candidates
-		candidates, err := k8s.DetectConversionCandidates(subchartPath)
+		candidates, err := k8s.DetectConversionCandidates(sub.Path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  Error: %v\n", err)
 			continue
 		}
 
 		// Also check for user-defined rules
-		userDetected := scanForUserRules(subchartPath)
+		userDetected := scanForUserRules(sub.Path)
 		candidates = append(candidates, userDetected...)
 
 		// Check template patterns
@@ -541,7 +548,7 @@ func runRecursiveDetect(umbrellaRoot string, verbose bool) error {
 				SectionName: c.SectionName,
 			})
 		}
-		matchedPaths := template.CheckTemplatePatterns(subchartPath, pathInfos)
+		matchedPaths := template.CheckTemplatePatterns(sub.Path, pathInfos)
 
 		// Report results
 		var detected, skipped []k8s.DetectedCandidate
@@ -559,7 +566,7 @@ func runRecursiveDetect(umbrellaRoot string, verbose bool) error {
 		}
 
 		// Check values.yaml existence for detected candidates
-		detected = k8s.CheckCandidatesInValues(subchartPath, detected)
+		detected = k8s.CheckCandidatesInValues(sub.Path, detected)
 
 		// Separate by values existence
 		var withValues, templateOnly []k8s.DetectedCandidate
@@ -574,7 +581,7 @@ func runRecursiveDetect(umbrellaRoot string, verbose bool) error {
 		if len(withValues) > 0 {
 			fmt.Printf("  Convertible - has values (%d):\n", len(withValues))
 			for _, c := range withValues {
-				if verbose {
+				if opts.Verbose {
 					fmt.Printf("    %s\n", c.ValuesPath)
 					fmt.Printf("      Key:  %s\n", c.MergeKey)
 					if c.ElementType != "" {
@@ -604,6 +611,11 @@ func runRecursiveDetect(umbrellaRoot string, verbose bool) error {
 		}
 	}
 
+	// Display warning for expanded remote dependencies
+	if len(expandedCharts) > 0 {
+		displayRemoteWarning(expandedCharts)
+	}
+
 	// Summary
 	fmt.Println("\n=== Detection Summary ===")
 	fmt.Printf("Total convertible paths: %d\n", totalDetected)
@@ -611,7 +623,21 @@ func runRecursiveDetect(umbrellaRoot string, verbose bool) error {
 
 	if totalDetected > 0 {
 		fmt.Println("\nTo convert, run:")
-		fmt.Printf("  helm list-to-map convert --chart %s --recursive\n", umbrellaRoot)
+		var flags []string
+		if opts.Recursive {
+			flags = append(flags, "--recursive")
+		}
+		if opts.IncludeChartsDir {
+			flags = append(flags, "--include-charts-dir")
+		}
+		if opts.ExpandRemote {
+			flags = append(flags, "--expand-remote")
+		}
+		flagStr := ""
+		if len(flags) > 0 {
+			flagStr = " " + strings.Join(flags, " ")
+		}
+		fmt.Printf("  helm list-to-map convert --chart %s%s\n", umbrellaRoot, flagStr)
 	}
 
 	return nil

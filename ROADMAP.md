@@ -95,9 +95,9 @@ When detected fields like `containers` or `initContainers` are found, the CLI no
 
 ### Umbrella Chart & Subchart Handling
 
-**Status:** Phase 1 Complete, Phases 2-3 Planned
+**Status:** ✅ All Phases Complete (Phase 1-3)
 
-See [DEPENDENCY-HANDLING-PLAN.md](docs/DEPENDENCY-HANDLING-PLAN.md) for full details.
+See [Future Enhancements: Dependency Handling](#future-enhancements-dependency-handling) below for planned improvements.
 
 #### Phase 1: `--recursive` flag (Complete)
 
@@ -120,7 +120,7 @@ Features:
 
 **Planned Enhancement:** Global values support - When processing subcharts, check if fields like `imagePullSecrets` exist in umbrella's `global.*` values (which Helm merges into subcharts). This would allow detect to recognize that `imagePullSecrets` could come from `global.imagePullSecrets` in the parent chart.
 
-#### Phase 2: `--include-charts-dir` flag (Planned)
+#### Phase 2: `--include-charts-dir` flag (Complete)
 
 Support for embedded subcharts in `charts/` directory (not declared in Chart.yaml):
 
@@ -128,9 +128,14 @@ Support for embedded subcharts in `charts/` directory (not declared in Chart.yam
 helm list-to-map convert --chart ./my-chart --include-charts-dir
 ```
 
-Use case: Charts that vendor subcharts directly without using dependency declarations.
+Features:
 
-#### Phase 3: `--expand-remote` flag (Planned)
+- Scans `charts/` directory for subdirectories containing `Chart.yaml`
+- Processes these subcharts in addition to `file://` dependencies
+- Deduplicates when same subchart is both in Chart.yaml and charts/
+- Use case: Charts that vendor subcharts directly without using dependency declarations
+
+#### Phase 3: `--expand-remote` flag (Complete)
 
 Support for remote dependencies (Helm repos, OCI registries):
 
@@ -138,11 +143,13 @@ Support for remote dependencies (Helm repos, OCI registries):
 helm list-to-map convert --chart ./umbrella --recursive --expand-remote
 ```
 
-This will:
+Features:
 
-- Extract tarballs in `charts/` to directories
-- Convert those directories
-- Print prominent warning about limitations
+- Detects `.tgz` files in `charts/` directory
+- Extracts tarballs to directories (creates `.tgz.bak` backup)
+- Converts extracted charts
+- Displays prominent warning box about limitations
+- Tracks repository URL from Chart.yaml for warning display
 
 **Warning:** Changes to remote dependencies will be lost on `helm dependency update`. This is a last-resort option for users who need to convert but cannot modify the source.
 
@@ -273,3 +280,40 @@ Create `examples/` directory with:
 - Before/after chart conversions
 - Common patterns and their solutions
 - Integration with popular charts (bitnami, prometheus-operator)
+
+---
+
+## Future Enhancements: Dependency Handling
+
+### Migration Guide Export
+
+**Status:** Not started
+
+When converting with `--expand-remote`, could export a migration guide showing changes to apply upstream:
+
+```bash
+helm list-to-map convert --chart ./umbrella --expand-remote --export-migrations ./migrations/
+```
+
+Output:
+
+```
+migrations/
+├── mysql-migration.md      # Changes to apply to upstream mysql chart
+├── redis-migration.md      # Changes to apply to upstream redis chart
+└── summary.md              # Overview of all changes
+```
+
+This would help users contribute converted changes back to upstream chart repositories.
+
+### Upstream PR Generation
+
+**Status:** Not started
+
+Could potentially generate PRs for upstream charts:
+
+```bash
+helm list-to-map generate-upstream-pr --chart ./umbrella/charts/mysql
+```
+
+This is likely out of scope for this plugin but could be a separate tool.
