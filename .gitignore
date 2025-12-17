@@ -1,3 +1,7 @@
 .claude
 CLAUDE.md
 /bin
+
+# Test coverage
+coverage.out
+coverage.html
