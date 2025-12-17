@@ -1,0 +1,8 @@
+# Ignore all Go source files
+**/*.go
+
+# Ignore all plain text files
+**/*.txt
+
+# Ignore test fixtures
+cmd/testdata/
