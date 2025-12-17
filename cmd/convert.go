@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,67 +11,19 @@ import (
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/transform"
 )
 
-func runConvert() {
-	fs := flag.NewFlagSet("convert", flag.ExitOnError)
-	fs.StringVar(&chartDir, "chart", ".", "path to chart root")
-	fs.StringVar(&configPath, "config", "", "path to user config")
-	fs.BoolVar(&dryRun, "dry-run", false, "preview changes without writing files")
-	fs.StringVar(&backupExt, "backup-ext", ".bak", "backup file extension")
-	fs.BoolVar(&recursive, "recursive", false, "recursively convert file:// subcharts and update umbrella values")
-	fs.Usage = func() {
-		fmt.Print(`
-Transform array-based configurations to map-based configurations in values.yaml
-and automatically update corresponding template files. This command modifies files
-in place, creating backups with the specified extension.
-
-The conversion process:
-  1. Scans templates using K8s API introspection and CRD schemas
-  2. Identifies list fields with required unique keys (patchMergeKey or x-kubernetes-list-map-keys)
-  3. Converts matching arrays to maps using unique key fields
-  4. Updates template files to use new helper functions
-  5. Generates helper templates if they don't exist
-
-Built-in Kubernetes types are detected automatically. For Custom Resources (CRs),
-first load their CRD definitions using 'helm list-to-map load-crd'.
-
-Usage:
-  helm list-to-map convert [flags]
-
-Flags:
-      --backup-ext string   backup file extension (default: ".bak")
-      --chart string        path to chart root (default: current directory)
-      --config string       path to user config (default: $HELM_CONFIG_HOME/list-to-map/config.yaml)
-      --dry-run             preview changes without writing files
-  -h, --help                help for convert
-      --recursive           recursively convert file:// subcharts and update umbrella values
-
-Examples:
-  # Convert a chart with built-in K8s types
-  helm list-to-map convert --chart ./my-chart
-
-  # First load CRDs for Custom Resources, then convert
-  helm list-to-map load-crd https://raw.githubusercontent.com/.../alertmanager-crd.yaml
-  helm list-to-map convert --chart ./my-chart
-
-  # Preview changes without modifying files
-  helm list-to-map convert --dry-run
-
-  # Convert umbrella chart and all file:// subcharts recursively
-  helm list-to-map convert --chart ./umbrella-chart --recursive
-`)
-	}
-	_ = fs.Parse(os.Args[2:])
-
-	root, err := findChartRoot(chartDir)
+func runConvert(opts ConvertOptions) error {
+	root, err := findChartRoot(opts.ChartDir)
 	if err != nil {
-		fatal(err)
+		return err
 	}
 
 	// Handle recursive conversion of umbrella charts
-	if recursive {
-		runRecursiveConvert(root)
-		return
+	if opts.Recursive {
+		return runRecursiveConvert(root, opts)
 	}
+
+	// Local variable to track converted paths
+	var transformedPaths []template.PathInfo
 
 	// Load CRDs from plugin config directory
 	if err := loadCRDsFromConfig(); err != nil {
@@ -82,7 +33,7 @@ Examples:
 	// Use new programmatic detection via K8s API introspection
 	candidates, err := k8s.DetectConversionCandidates(root)
 	if err != nil {
-		fatal(err)
+		return err
 	}
 
 	// Also check for user-defined rules (for CRDs)
@@ -150,7 +101,7 @@ Examples:
 	valuesPath := filepath.Join(root, "values.yaml")
 	doc, raw, err := loadValuesNode(valuesPath)
 	if err != nil {
-		fatal(err)
+		return err
 	}
 
 	// Use line-based editing to preserve original formatting
@@ -163,17 +114,17 @@ Examples:
 	if len(edits) > 0 {
 		out := transform.ApplyLineEdits(raw, edits)
 
-		if dryRun {
+		if opts.DryRun {
 			fmt.Println("=== values.yaml (updated preview) ===")
 			fmt.Println(string(out))
 		} else {
-			backupPath := valuesPath + backupExt
-			if err := backupFile(valuesPath, backupExt, raw); err != nil {
-				fatal(err)
+			backupPath := valuesPath + opts.BackupExt
+			if err := backupFile(valuesPath, opts.BackupExt, raw); err != nil {
+				return err
 			}
 			backupFiles = append(backupFiles, backupPath)
 			if err := os.WriteFile(valuesPath, out, 0644); err != nil {
-				fatal(err)
+				return err
 			}
 		}
 
@@ -253,11 +204,11 @@ Examples:
 
 	var tchanges []string
 	var helperCreated bool
-	if !dryRun {
+	if !opts.DryRun {
 		var err error
-		tchanges, backupFiles, err = template.RewriteTemplatesWithBackups(root, transformedPaths, backupExt, backupFiles)
+		tchanges, backupFiles, err = template.RewriteTemplatesWithBackups(root, transformedPaths, opts.BackupExt, backupFiles)
 		if err != nil {
-			fatal(err)
+			return err
 		}
 
 		if len(tchanges) > 0 {
@@ -281,7 +232,7 @@ Examples:
 	}
 
 	// Report backup files
-	if !dryRun && len(backupFiles) > 0 {
+	if !opts.DryRun && len(backupFiles) > 0 {
 		fmt.Println("\nBackup files created:")
 		for _, bf := range backupFiles {
 			relPath, _ := filepath.Rel(root, bf)
@@ -292,15 +243,17 @@ Examples:
 		}
 	}
 
-	if len(edits) == 0 && len(tchanges) == 0 && len(templateOnlyCandidates) == 0 && !dryRun {
+	if len(edits) == 0 && len(tchanges) == 0 && len(templateOnlyCandidates) == 0 && !opts.DryRun {
 		fmt.Println("Nothing to convert.")
 	}
+
+	return nil
 }
 
 // convertSubchartAndTrack converts a subchart and returns the converted paths
-func convertSubchartAndTrack(subchartPath string) (*SubchartConversion, error) {
-	// Reset global transformedPaths before conversion
-	transformedPaths = nil
+func convertSubchartAndTrack(subchartPath string, opts ConvertOptions) (*SubchartConversion, error) {
+	// Local variable to track converted paths
+	var transformedPaths []template.PathInfo
 
 	// Load CRDs from plugin config directory
 	if err := loadCRDsFromConfig(); err != nil {
@@ -351,9 +304,9 @@ func convertSubchartAndTrack(subchartPath string) (*SubchartConversion, error) {
 	if len(edits) > 0 {
 		out := transform.ApplyLineEdits(raw, edits)
 
-		if !dryRun {
-			backupPath := valuesPath + backupExt
-			if err := backupFile(valuesPath, backupExt, raw); err != nil {
+		if !opts.DryRun {
+			backupPath := valuesPath + opts.BackupExt
+			if err := backupFile(valuesPath, opts.BackupExt, raw); err != nil {
 				return nil, fmt.Errorf("backing up values.yaml: %w", err)
 			}
 			fmt.Printf("    Backup: %s\n", backupPath)
@@ -373,8 +326,8 @@ func convertSubchartAndTrack(subchartPath string) (*SubchartConversion, error) {
 	}
 
 	// Rewrite templates
-	if !dryRun && len(transformedPaths) > 0 {
-		tchanges, _, err := template.RewriteTemplatesWithBackups(subchartPath, transformedPaths, backupExt, nil)
+	if !opts.DryRun && len(transformedPaths) > 0 {
+		tchanges, _, err := template.RewriteTemplatesWithBackups(subchartPath, transformedPaths, opts.BackupExt, nil)
 		if err != nil {
 			return nil, fmt.Errorf("rewriting templates: %w", err)
 		}
@@ -398,7 +351,7 @@ func convertSubchartAndTrack(subchartPath string) (*SubchartConversion, error) {
 
 // updateUmbrellaValues updates the umbrella chart's values.yaml to convert arrays to maps
 // for paths that were converted in subcharts
-func updateUmbrellaValues(umbrellaRoot string, conversions []SubchartConversion) error {
+func updateUmbrellaValues(umbrellaRoot string, conversions []SubchartConversion, opts ConvertOptions) error {
 	valuesPath := filepath.Join(umbrellaRoot, "values.yaml")
 	doc, raw, err := loadValuesNode(valuesPath)
 	if err != nil {
@@ -438,14 +391,14 @@ func updateUmbrellaValues(umbrellaRoot string, conversions []SubchartConversion)
 	// Apply edits
 	out := transform.ApplyLineEdits(raw, edits)
 
-	if dryRun {
+	if opts.DryRun {
 		fmt.Println("\n=== Umbrella values.yaml updates (dry-run) ===")
 		for _, edit := range edits {
 			fmt.Printf("  Would convert: %s\n", edit.Candidate.ValuesPath)
 		}
 	} else {
-		backupPath := valuesPath + backupExt
-		if err := backupFile(valuesPath, backupExt, raw); err != nil {
+		backupPath := valuesPath + opts.BackupExt
+		if err := backupFile(valuesPath, opts.BackupExt, raw); err != nil {
 			return fmt.Errorf("backing up umbrella values.yaml: %w", err)
 		}
 		if err := os.WriteFile(valuesPath, out, 0644); err != nil {
@@ -464,19 +417,19 @@ func updateUmbrellaValues(umbrellaRoot string, conversions []SubchartConversion)
 
 // runRecursiveConvert handles the --recursive flag for umbrella charts
 // It converts all file:// subcharts and then updates the umbrella values.yaml
-func runRecursiveConvert(umbrellaRoot string) {
+func runRecursiveConvert(umbrellaRoot string, opts ConvertOptions) error {
 	fmt.Printf("Recursive conversion for umbrella chart: %s\n", umbrellaRoot)
 
 	// Parse Chart.yaml to find file:// dependencies
 	deps, err := parseChartDependencies(umbrellaRoot)
 	if err != nil {
-		fatal(fmt.Errorf("parsing dependencies: %w", err))
+		return fmt.Errorf("parsing dependencies: %w", err)
 	}
 
 	if len(deps) == 0 {
 		fmt.Println("No file:// dependencies found in Chart.yaml.")
 		fmt.Println("Use --recursive only for umbrella charts with local subcharts.")
-		return
+		return nil
 	}
 
 	fmt.Printf("\nFound %d file:// subchart(s):\n", len(deps))
@@ -498,7 +451,7 @@ func runRecursiveConvert(umbrellaRoot string) {
 		fmt.Printf("\n=== Converting subchart: %s ===\n", dep.Name)
 		fmt.Printf("  Path: %s\n", subchartPath)
 
-		conv, err := convertSubchartAndTrack(subchartPath)
+		conv, err := convertSubchartAndTrack(subchartPath, opts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  Error: %v\n", err)
 			continue
@@ -518,8 +471,8 @@ func runRecursiveConvert(umbrellaRoot string) {
 	// Update umbrella values.yaml with converted subchart paths
 	if len(conversions) > 0 {
 		fmt.Printf("\n=== Updating umbrella values.yaml ===\n")
-		if err := updateUmbrellaValues(umbrellaRoot, conversions); err != nil {
-			fatal(err)
+		if err := updateUmbrellaValues(umbrellaRoot, conversions, opts); err != nil {
+			return err
 		}
 	} else {
 		fmt.Println("\nNo subcharts were converted, umbrella values.yaml unchanged.")
@@ -534,7 +487,9 @@ func runRecursiveConvert(umbrellaRoot string) {
 	fmt.Printf("Subcharts converted: %d\n", len(conversions))
 	fmt.Printf("Total paths converted: %d\n", totalPaths)
 
-	if !dryRun {
+	if !opts.DryRun {
 		fmt.Println("\nNote: Run 'helm dependency build' to rebuild chart dependencies.")
 	}
+
+	return nil
 }

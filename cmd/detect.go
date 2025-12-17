@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"io/fs"
 	"os"
@@ -14,58 +13,15 @@ import (
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/template"
 )
 
-func runDetect() {
-	fs := flag.NewFlagSet("detect", flag.ExitOnError)
-	fs.StringVar(&chartDir, "chart", ".", "path to chart root")
-	fs.StringVar(&configPath, "config", "", "path to user config")
-	verbose := false
-	fs.BoolVar(&verbose, "v", false, "verbose output (show template files, partials, and warnings)")
-	fs.BoolVar(&recursive, "recursive", false, "recursively detect in file:// subcharts")
-	fs.Usage = func() {
-		fmt.Print(`
-Scan a Helm chart to detect arrays that can be converted to maps based on
-unique key fields. This is a read-only operation that reports potential conversions
-without modifying any files.
-
-Built-in Kubernetes types (Deployment, Pod, Service, etc.) are detected automatically.
-For Custom Resources (CRs), first load their CRD definitions using 'helm list-to-map load-crd'.
-
-Usage:
-  helm list-to-map detect [flags]
-
-Flags:
-      --chart string    path to chart root (default: current directory)
-      --config string   path to user config (default: $HELM_CONFIG_HOME/list-to-map/config.yaml)
-  -h, --help            help for detect
-      --recursive       recursively detect in file:// subcharts (for umbrella charts)
-  -v                    verbose output (show template files, partials, and warnings)
-
-Examples:
-  # Detect convertible fields in a chart
-  helm list-to-map detect --chart ./my-chart
-
-  # First load CRDs for Custom Resources, then detect
-  helm list-to-map load-crd https://raw.githubusercontent.com/.../alertmanager-crd.yaml
-  helm list-to-map detect --chart ./my-chart
-
-  # Verbose output to see warnings and partial templates
-  helm list-to-map detect --chart ./my-chart -v
-
-  # Detect in umbrella chart and all file:// subcharts
-  helm list-to-map detect --chart ./umbrella-chart --recursive
-`)
-	}
-	_ = fs.Parse(os.Args[2:])
-
-	root, err := findChartRoot(chartDir)
+func runDetect(opts DetectOptions) error {
+	root, err := findChartRoot(opts.ChartDir)
 	if err != nil {
-		fatal(err)
+		return err
 	}
 
 	// Handle recursive detection for umbrella charts
-	if recursive {
-		runRecursiveDetect(root, verbose)
-		return
+	if opts.Recursive {
+		return runRecursiveDetect(root, opts.Verbose)
 	}
 
 	// Load CRDs from plugin config directory
@@ -76,7 +32,7 @@ Examples:
 	// Use new programmatic detection via K8s API introspection
 	result, err := k8s.DetectConversionCandidatesFull(root)
 	if err != nil {
-		fatal(err)
+		return err
 	}
 
 	// Also check for user-defined rules (for CRDs)
@@ -114,7 +70,7 @@ Examples:
 	if len(withValues) > 0 {
 		fmt.Println("Detected convertible arrays:")
 		for _, info := range withValues {
-			if verbose {
+			if opts.Verbose {
 				fmt.Printf("  %s\n", info.ValuesPath)
 				fmt.Printf("    Key:      %s\n", info.MergeKey)
 				if info.ElementType != "" {
@@ -149,7 +105,7 @@ Examples:
 				typeInfo = fmt.Sprintf(", type=%s", info.ElementType)
 			}
 			fmt.Printf("  %s (key=%s%s)\n", info.ValuesPath, info.MergeKey, typeInfo)
-			if verbose && info.TemplateFile != "" {
+			if opts.Verbose && info.TemplateFile != "" {
 				fmt.Printf("    Template: %s\n", info.TemplateFile)
 			}
 		}
@@ -173,13 +129,13 @@ Examples:
 			fmt.Println()
 			for _, u := range knownArrays {
 				fmt.Printf("  %s (in %s:%d)\n", u.ValuesPath, u.TemplateFile, u.LineNumber)
-				if verbose {
+				if opts.Verbose {
 					fmt.Printf("    %s\n", u.Reason)
 					addRuleCmd := fmt.Sprintf("helm list-to-map add-rule --path='%s[]' --uniqueKey=name", u.ValuesPath)
 					fmt.Printf("    Add rule: %s\n", addRuleCmd)
 				}
 			}
-			if !verbose {
+			if !opts.Verbose {
 				fmt.Println()
 				fmt.Println("  Use -v for suggested add-rule commands.")
 			}
@@ -193,7 +149,7 @@ Examples:
 			fmt.Println()
 			for _, u := range missingCRD {
 				fmt.Printf("  %s (in %s:%d)\n", u.ValuesPath, u.TemplateFile, u.LineNumber)
-				if verbose {
+				if opts.Verbose {
 					fmt.Printf("    Resource: %s/%s\n", u.APIVersion, u.Kind)
 				}
 			}
@@ -208,7 +164,7 @@ Examples:
 			fmt.Println()
 			for _, u := range unknownType {
 				fmt.Printf("  %s (in %s:%d)\n", u.ValuesPath, u.TemplateFile, u.LineNumber)
-				if verbose {
+				if opts.Verbose {
 					addRuleCmd := fmt.Sprintf("helm list-to-map add-rule --path='%s[]' --uniqueKey=name", u.ValuesPath)
 					fmt.Printf("    Add rule: %s\n", addRuleCmd)
 				}
@@ -217,7 +173,7 @@ Examples:
 
 		// Check if any detected candidates have nested list fields that users should know about
 		nestedListWarnings := findNestedListFieldWarnings(result.Candidates)
-		if len(nestedListWarnings) > 0 && verbose {
+		if len(nestedListWarnings) > 0 && opts.Verbose {
 			fmt.Println()
 			fmt.Println("Note: Some detected fields render large objects containing nested lists:")
 			for _, w := range nestedListWarnings {
@@ -226,14 +182,14 @@ Examples:
 			fmt.Println("  Consider breaking these into separate values for better override granularity.")
 		}
 
-		if verbose && (len(knownArrays) > 0 || len(unknownType) > 0) {
+		if opts.Verbose && (len(knownArrays) > 0 || len(unknownType) > 0) {
 			fmt.Println()
 			fmt.Println("Tip: Replace 'name' with the actual unique key field for each array.")
 		}
 	}
 
 	// Print partial templates info (verbose only)
-	if verbose && len(result.Partials) > 0 {
+	if opts.Verbose && len(result.Partials) > 0 {
 		fmt.Println()
 		fmt.Println("Partial templates:")
 		for _, p := range result.Partials {
@@ -304,6 +260,8 @@ Examples:
 	if len(allDetected) == 0 && len(result.Undetected) == 0 {
 		fmt.Println("No convertible lists detected.")
 	}
+
+	return nil
 }
 
 // nestedListWarning represents a detected field that has nested list fields
@@ -524,19 +482,19 @@ func scanForUserRules(chartRoot string) []k8s.DetectedCandidate {
 
 // runRecursiveDetect handles the --recursive flag for detect command
 // It detects convertible paths in all file:// subcharts
-func runRecursiveDetect(umbrellaRoot string, verbose bool) {
+func runRecursiveDetect(umbrellaRoot string, verbose bool) error {
 	fmt.Printf("Recursive detection for umbrella chart: %s\n", umbrellaRoot)
 
 	// Parse Chart.yaml to find file:// dependencies
 	deps, err := parseChartDependencies(umbrellaRoot)
 	if err != nil {
-		fatal(fmt.Errorf("parsing dependencies: %w", err))
+		return fmt.Errorf("parsing dependencies: %w", err)
 	}
 
 	if len(deps) == 0 {
 		fmt.Println("No file:// dependencies found in Chart.yaml.")
 		fmt.Println("Use --recursive only for umbrella charts with local subcharts.")
-		return
+		return nil
 	}
 
 	fmt.Printf("\nFound %d file:// subchart(s):\n", len(deps))
@@ -655,4 +613,6 @@ func runRecursiveDetect(umbrellaRoot string, verbose bool) {
 		fmt.Println("\nTo convert, run:")
 		fmt.Printf("  helm list-to-map convert --chart %s --recursive\n", umbrellaRoot)
 	}
+
+	return nil
 }

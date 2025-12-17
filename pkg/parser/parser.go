@@ -8,7 +8,6 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
-
 )
 
 // TemplateDirective represents a Go template directive found in a K8s manifest

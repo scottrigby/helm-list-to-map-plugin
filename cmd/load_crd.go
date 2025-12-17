@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,84 +11,35 @@ import (
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/crd"
 )
 
-func runLoadCRD() {
-	fs := flag.NewFlagSet("load-crd", flag.ExitOnError)
-	fs.BoolVar(&forceOverwrite, "force", false, "overwrite existing CRD files")
-	loadCommon := false
-	fs.BoolVar(&loadCommon, "common", false, "load CRDs from bundled crd-sources.yaml")
-	fs.Usage = func() {
-		fmt.Print(`
-Load CRD (Custom Resource Definition) files to enable detection of convertible
-fields in Custom Resources. CRDs are stored in the plugin's config directory
-and automatically loaded when running 'detect' or 'convert'.
-
-The plugin extracts x-kubernetes-list-type and x-kubernetes-list-map-keys
-annotations from the CRD's OpenAPI schema to identify convertible list fields.
-
-CRD files are named using the pattern {group}_{plural}_{storageVersion}.yaml,
-so different storage versions of the same CRD coexist without overwriting.
-Existing files are preserved unless --force is used.
-
-Usage:
-  helm list-to-map load-crd [flags] <source> [source...]
-  helm list-to-map load-crd --common
-
-Arguments:
-  source    CRD file path, directory, or URL (can specify multiple)
-
-Flags:
-      --common  load CRDs from bundled crd-sources.yaml (uses 'main' branch)
-      --force   overwrite existing CRD files with same storage version
-  -h, --help    help for load-crd
-
-Examples:
-  # Load CRD from a local file
-  helm list-to-map load-crd ./alertmanager-crd.yaml
-
-  # Load CRD from a URL
-  helm list-to-map load-crd https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/example/prometheus-operator-crd/monitoring.coreos.com_alertmanagers.yaml
-
-  # Load all CRDs from a directory (recursively)
-  helm list-to-map load-crd ./my-chart/crds/
-
-  # Load bundled common CRDs (from crd-sources.yaml)
-  helm list-to-map load-crd --common
-
-  # Force overwrite existing CRDs
-  helm list-to-map load-crd --force ./crds/
-`)
-	}
-	_ = fs.Parse(os.Args[2:])
-
+func runLoadCRD(opts LoadCRDOptions) error {
 	// Handle --common flag
-	if loadCommon {
-		loadCommonCRDs()
-		return
+	if opts.Common {
+		return loadCommonCRDs()
 	}
 
-	if fs.NArg() == 0 {
-		fmt.Fprintln(os.Stderr, "Error: at least one CRD source is required (or use --common)")
-		fmt.Fprintln(os.Stderr, "Run 'helm list-to-map load-crd --help' for usage.")
-		os.Exit(1)
+	if len(opts.Sources) == 0 {
+		return fmt.Errorf("at least one CRD source is required (or use --common)")
 	}
 
 	// Ensure CRD config directory exists
 	crdsDir := crdConfigDir()
 	if err := os.MkdirAll(crdsDir, 0755); err != nil {
-		fatal(fmt.Errorf("creating CRD directory: %w", err))
+		return fmt.Errorf("creating CRD directory: %w", err)
 	}
 
 	// Process each source
-	for _, source := range fs.Args() {
-		if err := loadAndStoreCRD(source, crdsDir); err != nil {
+	for _, source := range opts.Sources {
+		if err := loadAndStoreCRD(source, crdsDir, opts.Force); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: %s: %v\n", source, err)
 			continue
 		}
 	}
+
+	return nil
 }
 
 // loadCommonCRDs loads CRDs from the bundled common-crds.yaml file
-func loadCommonCRDs() {
+func loadCommonCRDs() error {
 	// Find common-crds.yaml in plugin directory
 	pluginDir := os.Getenv("HELM_PLUGIN_DIR")
 	if pluginDir == "" {
@@ -111,13 +61,13 @@ func loadCommonCRDs() {
 
 	sources, err := crd.LoadCRDSources(sourcesFile)
 	if err != nil {
-		fatal(fmt.Errorf("loading common-crds.yaml: %w", err))
+		return fmt.Errorf("loading common-crds.yaml: %w", err)
 	}
 
 	// Ensure CRD config directory exists
 	crdsDir := crdConfigDir()
 	if err := os.MkdirAll(crdsDir, 0755); err != nil {
-		fatal(fmt.Errorf("creating CRD directory: %w", err))
+		return fmt.Errorf("creating CRD directory: %w", err)
 	}
 
 	fmt.Printf("Loading CRDs from bundled sources...\n\n")
@@ -146,7 +96,7 @@ func loadCommonCRDs() {
 		fmt.Printf("  %s (version: %s)\n", group, version)
 		fmt.Printf("    Source: %s\n", url)
 
-		if err := loadAndStoreCRDFromURL(url, crdsDir); err != nil {
+		if err := loadAndStoreCRDFromURL(url, crdsDir, false); err != nil {
 			fmt.Printf("    Error: %v\n", err)
 			continue
 		}
@@ -164,13 +114,15 @@ func loadCommonCRDs() {
 	if len(types) > 0 {
 		fmt.Printf("\nTotal CRD types available: %d\n", len(types))
 	}
+
+	return nil
 }
 
 // loadAndStoreCRD loads a CRD from file, directory, or URL and stores it in the config directory
-func loadAndStoreCRD(source, crdsDir string) error {
+func loadAndStoreCRD(source, crdsDir string, force bool) error {
 	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
 		// Download from URL
-		return loadAndStoreCRDFromURL(source, crdsDir)
+		return loadAndStoreCRDFromURL(source, crdsDir, force)
 	}
 
 	// Check if source is a directory
@@ -181,15 +133,15 @@ func loadAndStoreCRD(source, crdsDir string) error {
 
 	if info.IsDir() {
 		// Load all CRD files from directory
-		return loadAndStoreCRDsFromDirectory(source, crdsDir)
+		return loadAndStoreCRDsFromDirectory(source, crdsDir, force)
 	}
 
 	// Load single file
-	return loadAndStoreCRDFromFile(source, crdsDir)
+	return loadAndStoreCRDFromFile(source, crdsDir, force)
 }
 
 // loadAndStoreCRDFromURL downloads a CRD from a URL and stores it
-func loadAndStoreCRDFromURL(url, crdsDir string) error {
+func loadAndStoreCRDFromURL(url, crdsDir string, force bool) error {
 	resp, err := http.Get(url) //nolint:gosec // User-provided URL is intentional
 	if err != nil {
 		return fmt.Errorf("fetching URL: %w", err)
@@ -219,7 +171,7 @@ func loadAndStoreCRDFromURL(url, crdsDir string) error {
 	destPath := filepath.Join(crdsDir, filename)
 
 	// Check if file exists (skip unless --force)
-	if exists, reason := crd.CRDFileExists(destPath); exists && !forceOverwrite {
+	if exists, reason := crd.CRDFileExists(destPath); exists && !force {
 		fmt.Printf("Skipped: %s -> %s (%s)\n", url, destPath, reason)
 		return nil
 	}
@@ -234,7 +186,7 @@ func loadAndStoreCRDFromURL(url, crdsDir string) error {
 }
 
 // loadAndStoreCRDFromFile loads a CRD from a file and stores it
-func loadAndStoreCRDFromFile(source, crdsDir string) error {
+func loadAndStoreCRDFromFile(source, crdsDir string, force bool) error {
 	data, err := os.ReadFile(source)
 	if err != nil {
 		return fmt.Errorf("reading file: %w", err)
@@ -250,7 +202,7 @@ func loadAndStoreCRDFromFile(source, crdsDir string) error {
 	destPath := filepath.Join(crdsDir, filename)
 
 	// Check if file exists (skip unless --force)
-	if exists, reason := crd.CRDFileExists(destPath); exists && !forceOverwrite {
+	if exists, reason := crd.CRDFileExists(destPath); exists && !force {
 		fmt.Printf("Skipped: %s -> %s (%s)\n", source, destPath, reason)
 		return nil
 	}
@@ -265,7 +217,7 @@ func loadAndStoreCRDFromFile(source, crdsDir string) error {
 }
 
 // loadAndStoreCRDsFromDirectory loads all CRD YAML files from a directory
-func loadAndStoreCRDsFromDirectory(sourceDir, crdsDir string) error {
+func loadAndStoreCRDsFromDirectory(sourceDir, crdsDir string, force bool) error {
 	var loaded, skipped int
 	err := filepath.WalkDir(sourceDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -280,7 +232,7 @@ func loadAndStoreCRDsFromDirectory(sourceDir, crdsDir string) error {
 
 		// Try to load each YAML file as a CRD
 		// Files that aren't valid CRDs are silently skipped
-		if err := loadAndStoreCRDFromFile(path, crdsDir); err != nil {
+		if err := loadAndStoreCRDFromFile(path, crdsDir, force); err != nil {
 			skipped++
 			return nil
 		}

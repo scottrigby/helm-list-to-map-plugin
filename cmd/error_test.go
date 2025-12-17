@@ -1,12 +1,13 @@
 package main
 
 import (
-	"github.com/scottrigby/helm-list-to-map-plugin/pkg/crd"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/crd"
 
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/transform"
 )

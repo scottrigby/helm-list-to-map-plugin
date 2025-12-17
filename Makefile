@@ -57,7 +57,7 @@ test-short:
 .PHONY: lint
 lint:
 	@echo "Running golangci-lint..."
-	@golangci-lint run
+	@golangci-lint run ./cmd/... ./pkg/...
 
 # Format code
 .PHONY: fmt

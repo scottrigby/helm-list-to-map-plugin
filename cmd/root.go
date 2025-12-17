@@ -2,6 +2,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,27 +43,15 @@ type ChartYAML struct {
 	Dependencies []ChartDependency `yaml:"dependencies"`
 }
 
-// Global variables (will be replaced with Options structs in Phase 5)
-var (
-	subcmd           string
-	chartDir         string
-	dryRun           bool
-	backupExt        string
-	configPath       string
-	recursive        bool
-	conf             Config
-	transformedPaths []template.PathInfo
-)
-
-// Global flag for force overwrite (set by runLoadCRD)
-var forceOverwrite bool
+// Global config loaded from user config file
+var conf Config
 
 func main() {
 	if len(os.Args) < 2 {
 		usage()
 		return
 	}
-	subcmd = os.Args[1]
+	subcmd := os.Args[1]
 
 	// Handle top-level help
 	if subcmd == "-h" || subcmd == "--help" {
@@ -71,6 +60,7 @@ func main() {
 	}
 
 	// Load user-defined rules for CRDs and custom resources
+	configPath := os.Getenv("HELM_LIST_TO_MAP_CONFIG")
 	if configPath == "" {
 		configPath = defaultUserConfigPath()
 	}
@@ -78,22 +68,28 @@ func main() {
 		_ = yaml.Unmarshal(b, &conf)
 	}
 
+	var err error
 	switch subcmd {
 	case "detect":
-		runDetect()
+		err = runDetectCommand()
 	case "convert":
-		runConvert()
+		err = runConvertCommand()
 	case "add-rule":
-		runAddRule()
+		err = runAddRuleCommand()
 	case "rules":
-		runListRules()
+		err = runListRulesCommand()
 	case "load-crd":
-		runLoadCRD()
+		err = runLoadCRDCommand()
 	case "list-crds":
-		runListCRDs()
+		err = runListCRDsCommand()
 	default:
 		fmt.Fprintf(os.Stderr, "Error: unknown command %q for \"helm list-to-map\"\n", subcmd)
 		fmt.Fprintf(os.Stderr, "Run 'helm list-to-map --help' for usage.\n")
+		os.Exit(1)
+	}
+
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
@@ -152,7 +148,147 @@ func crdConfigDir() string {
 	return filepath.Join(home, "list-to-map", "crds")
 }
 
-func fatal(err error) {
-	fmt.Fprintln(os.Stderr, "error:", err)
-	os.Exit(1)
+// Command wrapper functions that parse flags and create Options structs
+
+func runDetectCommand() error {
+	fs := flag.NewFlagSet("detect", flag.ExitOnError)
+	opts := DetectOptions{}
+	fs.StringVar(&opts.ChartDir, "chart", ".", "path to chart root")
+	fs.StringVar(&opts.ConfigPath, "config", "", "path to user config")
+	fs.BoolVar(&opts.Verbose, "v", false, "verbose output")
+	fs.BoolVar(&opts.Recursive, "recursive", false, "recursively detect in file:// subcharts")
+	fs.Usage = func() {
+		fmt.Print(`
+Scan a Helm chart to detect arrays that can be converted to maps based on
+unique key fields. This is a read-only operation that reports potential conversions
+without modifying any files.
+
+Usage:
+  helm list-to-map detect [flags]
+
+Flags:
+      --chart string    path to chart root (default: current directory)
+      --config string   path to user config
+  -h, --help            help for detect
+      --recursive       recursively detect in file:// subcharts
+  -v                    verbose output
+`)
+	}
+	_ = fs.Parse(os.Args[2:])
+	return runDetect(opts)
+}
+
+func runConvertCommand() error {
+	fs := flag.NewFlagSet("convert", flag.ExitOnError)
+	opts := ConvertOptions{}
+	fs.StringVar(&opts.ChartDir, "chart", ".", "path to chart root")
+	fs.StringVar(&opts.ConfigPath, "config", "", "path to user config")
+	fs.BoolVar(&opts.DryRun, "dry-run", false, "preview changes without writing files")
+	fs.StringVar(&opts.BackupExt, "backup-ext", ".bak", "backup file extension")
+	fs.BoolVar(&opts.Recursive, "recursive", false, "recursively convert file:// subcharts")
+	fs.Usage = func() {
+		fmt.Print(`
+Transform array-based configurations to map-based configurations in values.yaml
+and automatically update corresponding template files.
+
+Usage:
+  helm list-to-map convert [flags]
+
+Flags:
+      --backup-ext string   backup file extension (default: ".bak")
+      --chart string        path to chart root (default: current directory)
+      --config string       path to user config
+      --dry-run             preview changes without writing files
+  -h, --help                help for convert
+      --recursive           recursively convert file:// subcharts
+`)
+	}
+	_ = fs.Parse(os.Args[2:])
+	return runConvert(opts)
+}
+
+func runLoadCRDCommand() error {
+	fs := flag.NewFlagSet("load-crd", flag.ExitOnError)
+	opts := LoadCRDOptions{}
+	fs.BoolVar(&opts.Force, "force", false, "overwrite existing CRD files")
+	fs.BoolVar(&opts.Common, "common", false, "load CRDs from bundled crd-sources.yaml")
+	fs.Usage = func() {
+		fmt.Print(`
+Load CRD (Custom Resource Definition) files to enable detection of convertible
+fields in Custom Resources.
+
+Usage:
+  helm list-to-map load-crd [flags] <source> [source...]
+  helm list-to-map load-crd --common
+
+Flags:
+      --common  load CRDs from bundled crd-sources.yaml
+      --force   overwrite existing CRD files
+  -h, --help    help for load-crd
+`)
+	}
+	_ = fs.Parse(os.Args[2:])
+	opts.Sources = fs.Args()
+	return runLoadCRD(opts)
+}
+
+func runListCRDsCommand() error {
+	fs := flag.NewFlagSet("list-crds", flag.ExitOnError)
+	opts := ListCRDsOptions{}
+	fs.BoolVar(&opts.Verbose, "v", false, "show all convertible fields for each CRD")
+	fs.Usage = func() {
+		fmt.Print(`
+List all loaded CRD types and their convertible fields.
+
+Usage:
+  helm list-to-map list-crds [flags]
+
+Flags:
+  -h, --help   help for list-crds
+  -v           verbose
+`)
+	}
+	_ = fs.Parse(os.Args[2:])
+	return runListCRDs(opts)
+}
+
+func runAddRuleCommand() error {
+	fs := flag.NewFlagSet("add-rule", flag.ExitOnError)
+	opts := AddRuleOptions{}
+	fs.StringVar(&opts.Path, "path", "", "dot path to array (end with [])")
+	fs.StringVar(&opts.UniqueKey, "uniqueKey", "", "unique key field")
+	fs.StringVar(&opts.ConfigPath, "config", "", "path to user config")
+	fs.Usage = func() {
+		fmt.Print(`
+Add a custom conversion rule to your user configuration file.
+
+Usage:
+  helm list-to-map add-rule [flags]
+
+Flags:
+      --config string      path to user config
+  -h, --help               help for add-rule
+      --path string        dot path to array (end with [])
+      --uniqueKey string   unique key field
+`)
+	}
+	_ = fs.Parse(os.Args[2:])
+	return runAddRule(opts)
+}
+
+func runListRulesCommand() error {
+	fs := flag.NewFlagSet("rules", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Print(`
+List custom conversion rules for CRDs and custom resources.
+
+Usage:
+  helm list-to-map rules [flags]
+
+Flags:
+  -h, --help   help for rules
+`)
+	}
+	_ = fs.Parse(os.Args[2:])
+	return runListRules(ListRulesOptions{})
 }

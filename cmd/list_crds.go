@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -9,24 +8,7 @@ import (
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/crd"
 )
 
-func runListCRDs() {
-	fs := flag.NewFlagSet("list-crds", flag.ExitOnError)
-	verbose := false
-	fs.BoolVar(&verbose, "v", false, "show all convertible fields for each CRD")
-	fs.Usage = func() {
-		fmt.Print(`
-List all loaded CRD types and their convertible fields.
-
-Usage:
-  helm list-to-map list-crds [flags]
-
-Flags:
-  -h, --help   help for list-crds
-  -v           verbose - show all convertible fields for each CRD
-`)
-	}
-	_ = fs.Parse(os.Args[2:])
-
+func runListCRDs(opts ListCRDsOptions) error {
 	// Load CRDs from config
 	if err := loadCRDsFromConfig(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
@@ -36,10 +18,10 @@ Flags:
 	if len(types) == 0 {
 		fmt.Println("No CRDs loaded.")
 		fmt.Println("Use 'helm list-to-map load-crd <file-or-url>' to load CRD definitions.")
-		return
+		return nil
 	}
 
-	if verbose {
+	if opts.Verbose {
 		// Verbose: show each CRD with its fields
 		fmt.Printf("Loaded CRD types (%d):\n", len(types))
 		for _, t := range types {
@@ -77,4 +59,6 @@ Flags:
 
 		fmt.Println("\nUse -v to see field details.")
 	}
+
+	return nil
 }

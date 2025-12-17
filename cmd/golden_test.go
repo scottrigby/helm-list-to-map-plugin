@@ -298,16 +298,3 @@ func TestRecursiveDetectFormat(t *testing.T) {
 		t.Errorf("recursive output should mention subcharts\nGot:\n%s", outputStr)
 	}
 }
-
-// normalizeOutput normalizes output by trimming trailing whitespace and ensuring consistent line endings
-func normalizeOutput(s string) string {
-	lines := strings.Split(s, "\n")
-	var normalized []string
-	for _, line := range lines {
-		normalized = append(normalized, strings.TrimRight(line, " \t\r"))
-	}
-	result := strings.Join(normalized, "\n")
-	// Ensure single trailing newline
-	result = strings.TrimRight(result, "\n") + "\n"
-	return result
-}
