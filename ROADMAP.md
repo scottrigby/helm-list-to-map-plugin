@@ -177,6 +177,44 @@ These are currently skipped. Could potentially:
 
 ## CLI Improvements
 
+### Multiple values files support (`-f`/`--values`)
+
+**Status:** Not started
+
+Support custom values files in addition to the chart's default `values.yaml`, mirroring Helm's `-f` flag behavior:
+
+```bash
+# Detect with additional values files
+helm list-to-map detect --chart ./my-chart -f values-dev.yaml -f values-prod.yaml
+
+# Convert with additional values files
+helm list-to-map convert --chart ./my-chart -f values-dev.yaml -f values-prod.yaml
+```
+
+**Use cases:**
+
+1. **Environment-specific overrides** - Teams often maintain `values-dev.yaml`, `values-staging.yaml`, `values-prod.yaml` that override the base `values.yaml`. These override files may contain arrays that need conversion.
+
+2. **CI/CD pipelines** - Pipelines may pass `-f` flags to customize deployments. The converted override files need to match the converted base chart.
+
+3. **Local development** - Developers use local values files that override chart defaults.
+
+**Implementation requirements:**
+
+- Accept `-f`/`--values` flags (repeatable, like Helm)
+- Process each values file for array conversion
+- Maintain file order (later files override earlier ones, matching Helm semantics)
+- Report which file each detected candidate came from
+- Handle paths relative to CWD or chart directory
+- Consider: Should converted override files match the base chart's new map structure?
+
+**Edge cases to consider:**
+
+- Override file has array that base chart doesn't have
+- Override file has map where base chart has array (conflict)
+- Override file only overrides specific array items (partial override)
+- Values file doesn't exist (error handling)
+
 ### Verbose mode for detect
 
 **Status:** ✅ Completed

@@ -1,0 +1,17 @@
+# CRD matching Prometheus Alertmanager naming
+# Purpose: Test canonical filename generation
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: alertmanagers.monitoring.coreos.com
+spec:
+  group: monitoring.coreos.com
+  names:
+    kind: Alertmanager
+    plural: alertmanagers
+  versions:
+    - name: v1
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object

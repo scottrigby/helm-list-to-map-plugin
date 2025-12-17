@@ -32,3 +32,36 @@ clean:
 deps:
 	@go mod tidy
 	@go mod verify
+
+# Run all tests
+.PHONY: test
+test:
+	@echo "Running tests..."
+	@go test -v ./cmd/...
+
+# Run tests with coverage
+.PHONY: test-cover
+test-cover:
+	@echo "Running tests with coverage..."
+	@go test -v -coverprofile=coverage.out ./cmd/...
+	@go tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report: coverage.html"
+
+# Run tests in short mode (skip slow tests)
+.PHONY: test-short
+test-short:
+	@echo "Running tests (short mode)..."
+	@go test -v -short ./cmd/...
+
+# Run linter
+.PHONY: lint
+lint:
+	@echo "Running golangci-lint..."
+	@golangci-lint run
+
+# Format code
+.PHONY: fmt
+fmt:
+	@echo "Formatting code..."
+	@goimports -w .
+	@go fmt ./...

@@ -1,0 +1,32 @@
+# Empty arrays should still be detected
+emptyEnv: []
+
+# Nested empty
+nested:
+  containers: []
+
+# Already map-like (should be skipped)
+mapStyle:
+  myVolume:
+    configMap:
+      name: my-config
+
+# Array at same indent as key (block-style sequence with no indentation)
+volumes:
+- name: data
+  emptyDir: {}
+- name: config
+  configMap:
+    name: app-config
+
+# Single item array
+singleItemEnv:
+  - name: ONLY_VAR
+    value: only
+
+# Array with duplicate keys (last wins)
+duplicateKeys:
+  - name: DUPLICATE
+    value: first
+  - name: DUPLICATE
+    value: second

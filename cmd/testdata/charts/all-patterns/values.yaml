@@ -1,0 +1,38 @@
+# Test chart for all template patterns
+replicas: 1
+
+# Pattern 1: Direct toYaml with nindent
+env:
+  - name: DB_HOST
+    value: localhost
+
+# Pattern 2: toYaml with indent (no 'n')
+volumes:
+  - name: config
+    configMap:
+      name: my-config
+
+# Pattern 3: with block + toYaml
+volumeMounts:
+  - name: config
+    mountPath: /etc/config
+
+# Pattern 4: if block + toYaml
+ports:
+  - containerPort: 8080
+    name: http
+
+# Pattern 5: range loop
+initContainers:
+  - name: init
+    image: busybox
+    command: ["sh", "-c", "echo hello"]
+
+# Nested paths
+deployment:
+  extraEnv:
+    - name: NESTED_VAR
+      value: nested
+  extraVolumes:
+    - name: extra
+      emptyDir: {}

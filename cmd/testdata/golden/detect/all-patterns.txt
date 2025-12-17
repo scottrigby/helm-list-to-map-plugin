@@ -1,0 +1,8 @@
+Detected convertible arrays:
+  deployment.extraEnv (key=name, type=corev1.EnvVar)
+  deployment.extraVolumes (key=name, type=corev1.Volume)
+  initContainers (key=name, type=corev1.Container)
+  env (key=name, type=corev1.EnvVar)
+  volumeMounts (key=mountPath, type=corev1.VolumeMount)
+  ports (key=containerPort, type=corev1.ContainerPort)
+  volumes (key=name, type=corev1.Volume)

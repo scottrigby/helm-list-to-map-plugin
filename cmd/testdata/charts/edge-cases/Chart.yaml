@@ -1,0 +1,4 @@
+apiVersion: v2
+name: edge-cases
+version: 0.1.0
+description: Test chart with edge cases

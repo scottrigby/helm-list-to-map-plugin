@@ -1,0 +1,4 @@
+apiVersion: v2
+name: subchart-a
+description: Subchart for testing --recursive flag
+version: 0.1.0

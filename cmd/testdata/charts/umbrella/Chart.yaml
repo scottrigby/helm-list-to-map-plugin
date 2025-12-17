@@ -1,0 +1,9 @@
+apiVersion: v2
+name: umbrella
+description: Umbrella chart for testing --recursive flag
+version: 0.1.0
+
+dependencies:
+  - name: subchart-a
+    version: "0.1.0"
+    repository: "file://subcharts/subchart-a"

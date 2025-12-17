@@ -1,0 +1,4 @@
+apiVersion: v2
+name: all-patterns
+description: Test chart with all template patterns
+version: 0.1.0

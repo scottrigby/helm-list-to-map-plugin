@@ -1,0 +1,13 @@
+# Umbrella chart values
+replicas: 1
+
+# Top-level arrays
+env:
+  - name: UMBRELLA_VAR
+    value: umbrella
+
+# Subchart values override
+subchart-a:
+  env:
+    - name: SUBCHART_VAR
+      value: subchart

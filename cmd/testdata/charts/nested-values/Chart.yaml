@@ -1,0 +1,4 @@
+apiVersion: v2
+name: nested-values
+version: 0.1.0
+description: Test chart with nested value paths

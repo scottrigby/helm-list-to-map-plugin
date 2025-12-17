@@ -1,0 +1,12 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-umbrella
+spec:
+  replicas: {{ .Values.replicas }}
+  template:
+    spec:
+      containers:
+        - name: umbrella-app
+          env:
+            {{- toYaml .Values.env | nindent 12 }}

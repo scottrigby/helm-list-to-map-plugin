@@ -1,0 +1,59 @@
+# Test: Deeply nested arrays with commented examples at various levels
+# Purpose: Verify comment stripping works for nested structures
+# Expected: Comments are stripped at the correct nesting level only
+
+# Top-level nested structure
+database:
+  primary:
+    # Empty with commented example
+    env: []
+      # - name: POSTGRES_USER
+      #   value: admin
+      # - name: POSTGRES_PASSWORD
+      #   valueFrom:
+      #     secretKeyRef:
+      #       name: db-secret
+      #       key: password
+
+  replica:
+    # Actual array with trailing commented examples
+    env:
+      - name: POSTGRES_USER
+        value: readonly
+      # - name: POSTGRES_PASSWORD
+      #   value: secret
+
+# Multiple nesting levels
+app:
+  frontend:
+    deployment:
+      containers:
+        - name: nginx
+          ports:
+            - containerPort: 80
+              name: http
+            # - containerPort: 443
+            #   name: https
+          volumeMounts: []
+            # - name: static
+            #   mountPath: /usr/share/nginx/html
+
+  backend:
+    deployment:
+      # This is a descriptive comment (should NOT be removed)
+      # It explains what the initContainers do
+      initContainers: []
+        # - name: wait-for-db
+        #   image: busybox
+        #   command: ['sh', '-c', 'until nc -z db 5432; do sleep 1; done']
+
+# Edge case: Comment between sections (should be preserved)
+# This comment separates logical sections
+
+monitoring:
+  # Prometheus scrape config
+  annotations: []
+    # - name: prometheus.io/scrape
+    #   value: "true"
+    # - name: prometheus.io/port
+    #   value: "9090"

@@ -1,0 +1,31 @@
+# Test: Empty array with commented-out example items
+# Purpose: Verify that "env: []" with trailing commented examples gets cleaned up
+# Expected: After conversion, the commented examples should be removed
+
+# Basic case - empty array with single commented item
+env: []
+  # - name: DATABASE_URL
+  #   value: postgres://localhost/db
+
+# Empty array with multiple commented items
+volumes: []
+  # - name: data
+  #   emptyDir: {}
+  # - name: config
+  #   configMap:
+  #     name: app-config
+
+# Empty array - another example with mountPath key
+volumeMounts: []
+  # - name: data
+  #   mountPath: /data
+
+# Control: Empty array with NO commented examples (should stay as-is)
+ports: []
+
+# Control: Non-empty array (should convert normally, no stripping needed)
+labels:
+  - name: app
+    value: myapp
+  - name: version
+    value: v1

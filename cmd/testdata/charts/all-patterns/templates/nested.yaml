@@ -1,0 +1,15 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-nested
+spec:
+  template:
+    spec:
+      containers:
+        - name: nested-app
+          # Nested path: deployment.extraEnv
+          env:
+            {{- toYaml .Values.deployment.extraEnv | nindent 12 }}
+      # Nested path: deployment.extraVolumes
+      volumes:
+        {{- toYaml .Values.deployment.extraVolumes | nindent 8 }}

@@ -1,0 +1,15 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          {{- with .Values.emptyEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        {{- toYaml .Values.volumes | nindent 8 }}

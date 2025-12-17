@@ -1,0 +1,8 @@
+# Not a CRD - should be skipped when loading
+# Purpose: Test that non-CRD documents are properly skipped
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test
+data:
+  key: value

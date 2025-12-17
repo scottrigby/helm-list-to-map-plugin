@@ -1,0 +1,4 @@
+apiVersion: v2
+name: basic
+version: 0.1.0
+description: Basic test chart for list-to-map plugin

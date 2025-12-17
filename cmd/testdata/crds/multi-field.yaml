@@ -1,0 +1,39 @@
+# CRD with multiple list fields and different merge keys
+# Purpose: Test field lookup with single and multiple merge keys
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: apps.example.com
+spec:
+  group: example.com
+  names:
+    kind: App
+    plural: apps
+  versions:
+    - name: v1
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                containers:
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys:
+                    - name
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                ports:
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys:
+                    - containerPort
+                    - protocol
+                  items:
+                    type: object

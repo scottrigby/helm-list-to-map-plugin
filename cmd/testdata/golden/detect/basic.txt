@@ -1,0 +1,4 @@
+Detected convertible arrays:
+  env (key=name, type=corev1.EnvVar)
+  volumeMounts (key=mountPath, type=corev1.VolumeMount)
+  volumes (key=name, type=corev1.Volume)

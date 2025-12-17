@@ -1,0 +1,11 @@
+# Subchart-a values
+replicas: 1
+
+env:
+  - name: SUBCHART_DEFAULT
+    value: default
+
+volumes:
+  - name: subchart-config
+    configMap:
+      name: subchart-config

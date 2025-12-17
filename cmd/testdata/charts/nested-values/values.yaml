@@ -1,0 +1,22 @@
+app:
+  primary:
+    env:
+      - name: PRIMARY_HOST
+        value: primary.local
+      - name: PRIMARY_PORT
+        value: "5432"
+    volumeMounts:
+      - name: primary-data
+        mountPath: /data/primary
+  secondary:
+    env:
+      - name: SECONDARY_HOST
+        value: secondary.local
+
+deployment:
+  extraVolumes:
+    - name: shared
+      emptyDir: {}
+  extraVolumeMounts:
+    - name: shared
+      mountPath: /shared

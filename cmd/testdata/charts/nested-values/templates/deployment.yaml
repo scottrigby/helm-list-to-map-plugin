@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  template:
+    spec:
+      containers:
+        - name: primary
+          env:
+            {{- toYaml .Values.app.primary.env | nindent 12 }}
+          volumeMounts:
+            {{- toYaml .Values.app.primary.volumeMounts | nindent 12 }}
+        - name: secondary
+          env:
+            {{- toYaml .Values.app.secondary.env | nindent 12 }}
+      volumes:
+        {{- toYaml .Values.deployment.extraVolumes | nindent 8 }}
