@@ -1,0 +1,24 @@
+replicas: 1
+
+image:
+  repository: nginx
+  tag: latest
+
+env:
+  - name: DB_HOST
+    value: localhost
+  - name: DB_PORT
+    value: "5432"
+
+volumes:
+  - name: config
+    configMap:
+      name: my-config
+  - name: data
+    emptyDir: {}
+
+volumeMounts:
+  - name: config
+    mountPath: /etc/config
+  - name: data
+    mountPath: /data

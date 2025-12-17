@@ -1,0 +1,48 @@
+# Test: Arrays followed by multi-line commented examples
+# Purpose: Verify that commented examples spanning multiple lines are fully removed
+# Expected: All commented array items after conversion target should be stripped
+
+# Multi-line commented item with nested structure
+initContainers: []
+  # - name: init-db
+  #   image: postgres:15
+  #   command:
+  #     - sh
+  #     - -c
+  #     - |
+  #       echo "Waiting for database..."
+  #       sleep 10
+  #   env:
+  #     - name: PGHOST
+  #       value: localhost
+
+# Multiple multi-line items
+sidecars: []
+  # - name: logging-sidecar
+  #   image: fluent/fluent-bit:latest
+  #   volumeMounts:
+  #     - name: logs
+  #       mountPath: /var/log
+  # - name: metrics-sidecar
+  #   image: prom/node-exporter
+  #   ports:
+  #     - containerPort: 9100
+  #       name: metrics
+
+# Actual array that will be converted (with trailing comments to strip)
+extraEnv:
+  - name: LOG_LEVEL
+    value: info
+  - name: DEBUG
+    value: "false"
+  # - name: FEATURE_FLAG
+  #   value: enabled
+  # - name: EXPERIMENTAL
+  #   value: "true"
+
+# Control: Comments that are NOT array examples (descriptive comments - keep these)
+resources:
+  # These are the resource limits for the main container
+  limits:
+    cpu: 100m
+    memory: 128Mi

@@ -483,16 +483,22 @@ This follows dependency injection principles while keeping the global registry a
 
 ## Testing Strategy
 
-The codebase uses different testing approaches depending on what's being tested. Understanding when to use mocks vs real dependencies is crucial for maintainability.
+Tests are organized by execution mode and purpose:
+
+- **E2E** = Artifact/OS/process concerns (does it build and run?)
+- **In-process CLI** = Behavior/logic, flags, output flows (does it work correctly?)
+- **Integration** = Cross-package interactions
+- **Unit** = Pure functions with mocks
 
 ### Test Types
 
-**Unit Tests** (`pkg/*_test.go`)
+**Unit Tests** (`pkg/*_test.go`) - **FASTEST**
 
 - Test individual functions/packages in isolation
 - Use mock implementations (MockFileSystem, MockRegistry)
 - Fast execution (in-memory, no I/O)
 - Focus on logic correctness
+- Example: `pkg/transform/transform_test.go`, `pkg/template/rewrite_test.go`
 
 Example:
 
@@ -507,55 +513,77 @@ func TestRewriteTemplates(t *testing.T) {
 }
 ```
 
-**Integration Tests** (`cmd/*_test.go` - calling internal functions)
+**In-Process CLI Tests** (`cmd/*_test.go`) - **FAST**
 
-- Test multiple components working together
-- Use real filesystem via standard `os.*` calls
-- Use `t.TempDir()` for isolation
-- Call internal functions directly (e.g., `detectConversionCandidatesFull`)
+- Test command behavior by calling `runDetect()`, `runConvert()`, etc. directly
+- No binary compilation required (faster than E2E)
+- Use `internal/testutil` for test environment setup
+- Use real filesystem via `os.*` calls with `t.TempDir()` for isolation
+- Example: `cmd/detect_test.go`, `cmd/convert_test.go`, `cmd/errors_test.go`
 
 Example:
 
 ```go
-// cmd/integration_test.go, cmd/dependency_test.go
-func TestDetectCommand(t *testing.T) {
-    setupTestEnv(t)  // Sets HELM_CONFIG_HOME
-    chartPath := copyChart(t, "testdata/charts/basic")  // Real files
+// cmd/detect_test.go
+func TestDetectBasicChart(t *testing.T) {
+    testutil.SetupTestEnv(t)  // Sets HELM_CONFIG_HOME
+    testutil.ResetGlobalState(t)
 
-    result, err := detectConversionCandidatesFull(chartPath)  // Internal function
+    output, err := captureOutput(t, func() error {
+        return runDetect(DetectOptions{
+            ChartDir: "testdata/charts/basic",
+        })
+    })
 
-    // Verify detection logic with real chart files
+    // Verify detection output without binary execution
 }
 ```
 
-**End-to-End Tests** (`cmd/*_test.go` - executing binary)
+**Integration Tests** (`integration/*_test.go`) - **MEDIUM SPEED**
 
-- Test complete user workflows via CLI
-- Build binary with `go build`, execute with `exec.Command`
-- Use real filesystem, real Helm charts
-- Verify both command output and file modifications
+- Test cross-package workflows (e.g., transform + YAML parsing)
+- Require `//go:build integration` build tag
+- Use `integration/testutil` for chart copying helpers
+- Use `internal/testutil` for test environment setup
+- Example: `integration/comment_strip_test.go`
 
 Example:
 
 ```go
-// cmd/cli_test.go, cmd/subchart_integration_test.go
-func TestCLIConvertActual(t *testing.T) {
-    binPath := buildTestBinary(t)  // Builds actual binary
-    chartPath := copyChart(t, "testdata/charts/basic")
+//go:build integration
 
-    cmd := exec.Command(binPath, "convert", "--chart", chartPath)  // Exec binary
+// integration/comment_strip_test.go
+func TestCommentStripping(t *testing.T) {
+    internaltestutil.SetupTestEnv(t)
+    chartPath := testutil.CopyChart(t, "testdata/charts/basic")
+
+    // Test cross-package interaction between transform and YAML parsing
+}
+```
+
+**End-to-End Tests** (`e2e/*_test.go`) - **SLOWEST**
+
+- Minimal smoke tests that verify binary builds and runs
+- Require `//go:build e2e` build tag
+- Build binary with `go build`, execute with `exec.Command`
+- Use `e2e/testutil` for binary building
+- Example: `e2e/smoke_test.go`
+
+Example:
+
+```go
+//go:build e2e
+
+// e2e/smoke_test.go
+func TestBinaryBuildsAndRuns(t *testing.T) {
+    binPath := testutil.BuildTestBinary(t)
+
+    cmd := exec.Command(binPath, "--help")
     output, err := cmd.CombinedOutput()
 
-    // Verify both CLI output and file changes
-    convertedValues, _ := os.ReadFile(filepath.Join(chartPath, "values.yaml"))
-    // Check values.yaml was actually converted
+    // Verify binary executes and produces output
 }
 ```
-
-**Note:** Both integration and E2E tests live in `cmd/*_test.go` files. The distinction is:
-
-- **Integration tests** call internal functions (faster, easier to debug)
-- **E2E tests** execute the compiled binary (slower, tests actual user experience)
 
 ### When to Use MockFileSystem
 
@@ -602,19 +630,71 @@ Both are production code! The distinction is architectural:
 ### Test File Organization
 
 ```
-cmd/
-├── detect.go                  # Production: CLI command
-├── detect_test.go             # Integration: tests detect command
-├── cli_test.go                # E2E: tests CLI via exec.Command
-├── subchart_integration_test.go  # E2E: tests subchart workflows
-└── testdata/                  # Fixtures for integration tests
-    └── charts/
-
-pkg/template/
-├── rewrite.go                 # Production: template rewriting logic
-├── rewrite_test.go            # Unit: tests with MockFileSystem
-└── helper.go                  # Production: helper generation
+/
+├── e2e/                              # E2E tests (binary execution)
+│   ├── smoke_test.go                 # Smoke tests for binary
+│   ├── testutil/
+│   │   └── binary.go                 # Binary building helpers
+│   └── testdata/
+│       └── charts/basic/             # Minimal fixture
+│
+├── integration/                      # Integration tests (cross-package)
+│   ├── comment_strip_test.go         # Transform + YAML parsing
+│   ├── testutil/
+│   │   └── chart.go                  # Chart copying helpers
+│   └── testdata/
+│       └── values/                   # Comment strip fixtures
+│
+├── cmd/                              # In-process CLI tests
+│   ├── detect.go                     # Production: CLI command
+│   ├── detect_test.go                # Tests detect command (in-process)
+│   ├── convert_test.go               # Tests convert command (in-process)
+│   ├── errors_test.go                # Error handling tests
+│   ├── helpers_test.go               # Helper function tests
+│   ├── dependency_test.go            # Dependency scanning tests
+│   └── testdata/
+│       ├── charts/                   # Main chart fixtures
+│       └── golden/                   # Golden output files
+│
+├── internal/testutil/                # Shared test helpers
+│   └── env.go                        # SetupTestEnv, ResetGlobalState
+│
+└── pkg/
+    ├── template/
+    │   ├── rewrite.go                # Production: template rewriting
+    │   └── rewrite_test.go           # Unit: tests with MockFileSystem
+    └── transform/
+        ├── transform.go              # Production: array-to-map transform
+        └── transform_test.go         # Unit: tests transformation logic
 ```
+
+### Running Tests
+
+Use `make` targets for all test operations:
+
+```bash
+# Run all tests (unit + cmd + integration + e2e)
+make test
+
+# Run only fast tests (recommended during development)
+make test-no-e2e    # Runs: unit + cmd + integration
+
+# Run tests by type
+make test-unit          # Unit tests (pkg/) - fastest
+make test-cmd           # In-process CLI tests (cmd/) - fast
+make test-integration   # Integration tests - medium
+make test-e2e           # E2E tests (binary) - slowest
+
+# Coverage and other options
+make test-cover    # Generate coverage report
+make test-short    # Skip slow tests
+```
+
+**DO NOT** use `go test` directly. The Makefile handles build tags correctly:
+
+- Integration tests require `-tags=integration`
+- E2E tests require `-tags=e2e`
+- Without these tags, those tests are excluded from the build
 
 ### Design Rationale
 

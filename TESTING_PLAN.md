@@ -1,39 +1,50 @@
 # Testing Plan for list-to-map Helm Plugin
 
-This document provides a concrete implementation plan for the list-to-map test suite using idiomatic Go testing patterns.
+> **Note:** Test reorganization is complete. This document now serves as a roadmap for remaining test coverage.
+> For current test organization and guidelines, see `CONTRIBUTING.md` and `ARCHITECTURE.md`.
 
-## Current State
+This document tracks the test coverage roadmap for the list-to-map test suite.
 
-- **Source files**:
-  - `cmd/` - CLI layer: `root.go`, `detect.go`, `convert.go`, `load_crd.go`, `list_crds.go`, `add_rule.go`, `list_rules.go`, `helpers.go`, `options.go`
-  - `pkg/k8s/` - K8s type introspection, field schema navigation
-  - `pkg/crd/` - CRD registry, loading, embedded type detection
-  - `pkg/parser/` - Template parsing, directive extraction
-  - `pkg/transform/` - Array-to-map transformation
-  - `pkg/template/` - Template rewriting, helper generation
-  - `pkg/detect/` - Shared types
-  - `pkg/fs/` - FileSystem interface
-- **Test files**:
-  - `cmd/testutil_test.go` - Test utilities (setupTestEnv, copyChart, getTestdataPath)
-  - `cmd/glob_test.go` - Tests for matchGlob, matchRule (100% coverage)
-  - `cmd/integration_test.go` - Integration tests for chart loading, detection
-  - `cmd/cli_test.go` - CLI tests (detect, convert, --recursive, help)
-  - `cmd/error_test.go` - Error handling, edge cases, CLI error scenarios
-  - `cmd/golden_test.go` - Golden file tests for detect output verification
-  - `cmd/comment_strip_test.go` - Comment stripping tests
+## Current Test Organization
+
+Tests are organized by execution mode:
+
+- **Unit tests** (`pkg/*_test.go`) - Pure functions with mocks (fastest)
+- **In-process CLI tests** (`cmd/*_test.go`) - Call functions directly (fast)
+- **Integration tests** (`integration/*_test.go`) - Cross-package workflows (medium)
+- **E2E tests** (`e2e/*_test.go`) - Minimal smoke tests (slowest)
+
+### Existing Test Files
+
+- **In-process CLI tests** (`cmd/`):
+  - `cmd/detect_test.go` - Tests detect command in-process
+  - `cmd/convert_test.go` - Tests convert command in-process
+  - `cmd/errors_test.go` - Error handling and edge cases
+  - `cmd/helpers_test.go` - Tests for matchGlob, matchRule helpers
+  - `cmd/dependency_test.go` - Dependency scanning unit tests
+
+- **Integration tests** (`integration/`):
+  - `integration/comment_strip_test.go` - Comment stripping with transform
+
+- **E2E tests** (`e2e/`):
+  - `e2e/smoke_test.go` - Binary execution smoke tests
+
+- **Unit tests** (`pkg/`):
   - `pkg/transform/item_test.go` - Array transformation tests
   - `pkg/template/rewrite_test.go` - Template rewriting tests
-  - `pkg/crd/crd_test.go` - CRD registry, loading, parsing, embedded K8s type detection
-  - `pkg/crd/interface_test.go` - Registry interface mock examples
-  - `pkg/fs/fs_test.go` - FileSystem interface mock examples
-- **Test fixtures**:
-  - `cmd/testdata/charts/basic/` - Standard env, volumes, volumeMounts
-  - `cmd/testdata/charts/nested-values/` - Nested paths like `app.primary.env`
-  - `cmd/testdata/charts/edge-cases/` - Empty arrays, duplicates, block sequences
-  - `cmd/testdata/charts/all-patterns/` - All 5 template patterns
-  - `cmd/testdata/charts/umbrella/` - Umbrella chart with file:// subchart for --recursive
-- **Golden files**:
-  - `cmd/testdata/golden/detect/` - Expected detect output for basic, nested-values, all-patterns charts
+  - `pkg/crd/crd_test.go` - CRD registry, loading, parsing
+  - `pkg/crd/interface_test.go` - Registry interface mocks
+  - `pkg/fs/fs_test.go` - FileSystem interface mocks
+
+### Test Fixtures
+
+- `cmd/testdata/charts/basic/` - Standard env, volumes, volumeMounts
+- `cmd/testdata/charts/nested-values/` - Nested paths like `app.primary.env`
+- `cmd/testdata/charts/edge-cases/` - Empty arrays, duplicates, block sequences
+- `cmd/testdata/charts/all-patterns/` - All 5 template patterns
+- `cmd/testdata/charts/umbrella/` - Umbrella chart with file:// subchart for --recursive
+- `cmd/testdata/golden/detect/` - Expected detect output
+- `integration/testdata/values/` - Comment stripping fixtures
 
 ## Implementation Phases
 
@@ -1001,39 +1012,35 @@ test-update-golden:
 	go test -v ./cmd/... -update-golden
 ```
 
-## Implementation Checklist
+## Completed Phases ✅
 
-### Phase 1: Infrastructure ✅ COMPLETE
+### Phase 1: Infrastructure ✅
 
-- [x] Create `cmd/testdata/` directory structure
-- [x] Create `cmd/testutil_test.go` with helpers
-- [x] Create basic chart fixture
-- [x] Verify test infrastructure works with a simple test
+- Directory structure and test utilities
+- Testutil packages: `internal/testutil`, `integration/testutil`, `e2e/testutil`
+- Basic chart fixtures
 
-### Phase 2: Unit Tests ✅ COMPLETE
+### Phase 2: Unit Tests ✅
 
-- [x] `cmd/glob_test.go` - Glob pattern matching tests
-- [x] `pkg/transform/item_test.go` - Array transformation tests
-- [x] `pkg/template/rewrite_test.go` - Template rewriting tests
-- [x] `pkg/crd/crd_test.go` - CRD registry, loading, parsing, embedded K8s type detection
-- [x] `cmd/error_test.go` - Error handling and edge case tests
-- [x] `pkg/crd/interface_test.go` - Registry interface mock examples
-- [x] `pkg/fs/fs_test.go` - FileSystem interface mock examples
-- [ ] `pkg/k8s/*_test.go` - K8s type introspection tests (OPTIONAL)
-- [ ] `pkg/parser/*_test.go` - Template parsing tests (OPTIONAL)
+- `pkg/transform/`, `pkg/template/`, `pkg/crd/`, `pkg/fs/` test coverage
+- Helper function tests in `cmd/helpers_test.go`
 
-### Phase 3: Integration Tests ✅ COMPLETE
+### Phase 3: Core Integration Tests ✅
 
-- [x] `cmd/integration_test.go` - Chart loading, detection tests
-- [x] `cmd/cli_test.go` - CLI command tests (detect, convert, --recursive, help)
-- [x] Add chart fixtures (basic, nested-values, edge-cases, all-patterns, umbrella)
+- In-process CLI tests: `cmd/detect_test.go`, `cmd/convert_test.go`
+- Error handling: `cmd/errors_test.go`
+- Comment stripping: `integration/comment_strip_test.go`
 
-### Phase 4: Golden Files & Polish ✅ COMPLETE
+### Phase 4: E2E & Build System ✅
 
-- [x] Set up golden file infrastructure (`cmd/golden_test.go`)
-- [x] Create golden files for detect output (basic, nested-values, all-patterns)
-- [x] Add Makefile targets (test, test-cover, test-short)
-- [ ] Document test running in README (OPTIONAL)
+- E2E smoke tests: `e2e/smoke_test.go`
+- Makefile with granular test targets (`test-unit`, `test-cmd`, `test-integration`, `test-e2e`)
+- Documentation updated (CONTRIBUTING.md, ARCHITECTURE.md)
+
+### Optional Future Tests
+
+- [ ] `pkg/k8s/*_test.go` - K8s type introspection tests
+- [ ] `pkg/parser/*_test.go` - Template parsing tests
 
 ### Remaining Work
 
