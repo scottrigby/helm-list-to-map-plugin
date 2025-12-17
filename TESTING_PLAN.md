@@ -4,17 +4,28 @@ This document provides a concrete implementation plan for the list-to-map test s
 
 ## Current State
 
-- **Source files**: `cmd/analyzer.go`, `cmd/crd.go`, `cmd/parser.go`, `cmd/main.go`
-- **Test files** (74 test functions total):
+- **Source files**:
+  - `cmd/` - CLI layer: `root.go`, `detect.go`, `convert.go`, `load_crd.go`, `list_crds.go`, `add_rule.go`, `list_rules.go`, `helpers.go`, `options.go`
+  - `pkg/k8s/` - K8s type introspection, field schema navigation
+  - `pkg/crd/` - CRD registry, loading, embedded type detection
+  - `pkg/parser/` - Template parsing, directive extraction
+  - `pkg/transform/` - Array-to-map transformation
+  - `pkg/template/` - Template rewriting, helper generation
+  - `pkg/detect/` - Shared types
+  - `pkg/fs/` - FileSystem interface
+- **Test files**:
   - `cmd/testutil_test.go` - Test utilities (setupTestEnv, copyChart, getTestdataPath)
   - `cmd/glob_test.go` - Tests for matchGlob, matchRule (100% coverage)
-  - `cmd/transform_test.go` - Tests for array transformation (100% coverage)
-  - `cmd/template_test.go` - Tests for template rewriting (core: 100%, replaceListBlocks: 76%)
   - `cmd/integration_test.go` - Integration tests for chart loading, detection
   - `cmd/cli_test.go` - CLI tests (detect, convert, --recursive, help)
-  - `cmd/crd_test.go` - CRD registry, loading, parsing, embedded K8s type detection
   - `cmd/error_test.go` - Error handling, edge cases, CLI error scenarios
   - `cmd/golden_test.go` - Golden file tests for detect output verification
+  - `cmd/comment_strip_test.go` - Comment stripping tests
+  - `pkg/transform/item_test.go` - Array transformation tests
+  - `pkg/template/rewrite_test.go` - Template rewriting tests
+  - `pkg/crd/crd_test.go` - CRD registry, loading, parsing, embedded K8s type detection
+  - `pkg/crd/interface_test.go` - Registry interface mock examples
+  - `pkg/fs/fs_test.go` - FileSystem interface mock examples
 - **Test fixtures**:
   - `cmd/testdata/charts/basic/` - Standard env, volumes, volumeMounts
   - `cmd/testdata/charts/nested-values/` - Nested paths like `app.primary.env`
@@ -1002,12 +1013,14 @@ test-update-golden:
 ### Phase 2: Unit Tests ✅ COMPLETE
 
 - [x] `cmd/glob_test.go` - Glob pattern matching tests
-- [x] `cmd/transform_test.go` - Array transformation tests
-- [x] `cmd/template_test.go` - Template rewriting tests
-- [x] `cmd/crd_test.go` - CRD registry, loading, parsing, embedded K8s type detection
+- [x] `pkg/transform/item_test.go` - Array transformation tests
+- [x] `pkg/template/rewrite_test.go` - Template rewriting tests
+- [x] `pkg/crd/crd_test.go` - CRD registry, loading, parsing, embedded K8s type detection
 - [x] `cmd/error_test.go` - Error handling and edge case tests
-- [ ] `cmd/analyzer_test.go` - K8s type introspection tests (OPTIONAL - see code examples below)
-- [ ] `cmd/parser_test.go` - Template parsing tests (OPTIONAL - see code examples below)
+- [x] `pkg/crd/interface_test.go` - Registry interface mock examples
+- [x] `pkg/fs/fs_test.go` - FileSystem interface mock examples
+- [ ] `pkg/k8s/*_test.go` - K8s type introspection tests (OPTIONAL)
+- [ ] `pkg/parser/*_test.go` - Template parsing tests (OPTIONAL)
 
 ### Phase 3: Integration Tests ✅ COMPLETE
 
@@ -1030,7 +1043,7 @@ test-update-golden:
 2. `--expand-remote` tests - Tarball expansion
 3. Multiple values files (`-f`/`--values`) tests - See below
 
-**Optional enhancements:** 3. `cmd/analyzer_test.go` - K8s type introspection (code examples in Phase 2.1 below) 4. `cmd/parser_test.go` - Template parsing (code examples in Phase 2.3 below)
+**Optional enhancements:** `pkg/k8s/*_test.go` - K8s type introspection, `pkg/parser/*_test.go` - Template parsing (code examples in Phase 2.1 and 2.3 below)
 
 ## Notes
 

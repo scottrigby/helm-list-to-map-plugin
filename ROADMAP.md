@@ -52,24 +52,23 @@ When a CRD is loaded but a specific field path doesn't have `x-kubernetes-list-m
 
 ### Implement comprehensive test suite
 
-**Status:** Not started
+**Status:** ✅ Completed
 
 See [TESTING_PLAN.md](TESTING_PLAN.md) for the full testing strategy:
 
-- Unit tests for `analyzer.go`, `crd.go`, `parser.go`
+- Unit tests for `pkg/k8s/`, `pkg/crd/`, `pkg/parser/`, `pkg/transform/`, `pkg/template/`
 - Integration tests for CLI commands with isolated `HELM_CONFIG_HOME`
 - Golden file tests for output regression testing
 - Test fixtures: basic, nested-values, subcharts, dependencies, CRDs, partials, edge cases
 
 ### Add Makefile test targets
 
-**Status:** Not started
+**Status:** ✅ Completed
 
 ```makefile
 test:           # Run all tests
 test-short:     # Skip network-dependent tests
-test-coverage:  # Generate coverage report
-test-update-golden:  # Update golden files
+test-cover:     # Generate coverage report
 ```
 
 ## Detection Improvements
@@ -259,7 +258,7 @@ Test template detection and rewriting patterns against popular community Helm ch
 
 See [Template Rewriting Patterns](ARCHITECTURE.md#template-rewriting-patterns) in ARCHITECTURE.md for the current list of supported patterns. When testing reveals new patterns in community charts:
 
-1. Update `replaceListBlocks()` in `cmd/main.go` with new regex patterns
+1. Update `ReplaceListBlocks()` in `pkg/template/rewrite.go` with new regex patterns
 2. Add pattern examples to the ARCHITECTURE.md section
 3. Note which chart(s) use the pattern
 

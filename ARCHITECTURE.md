@@ -472,10 +472,29 @@ This follows dependency injection principles while keeping the global registry a
 
 ## File Overview
 
-- `cmd/analyzer.go`: K8s type registry, field schema navigation using reflection, and detection result types
-- `cmd/crd.go`: CRD YAML parsing, registry for Custom Resource support, and embedded K8s type detection
-- `cmd/parser.go`: Helm template parsing and directive extraction
-- `cmd/main.go`: CLI commands, value migration, and template rewriting
+**cmd/** - CLI layer:
+| File | Purpose |
+| --- | --- |
+| `root.go` | main(), usage(), command routing, types |
+| `detect.go` | detect + recursive-detect commands |
+| `convert.go` | convert + recursive-convert commands |
+| `load_crd.go` | load-crd command |
+| `list_crds.go` | list-crds command |
+| `add_rule.go` | add-rule command |
+| `list_rules.go` | rules command |
+| `helpers.go` | findChartRoot, loadValuesNode, matchRule, etc. |
+| `options.go` | Options structs for all commands |
+
+**pkg/** - Domain logic:
+| Package | Purpose |
+| --- | --- |
+| `pkg/k8s/` | K8s type introspection, field schema navigation, merge key detection |
+| `pkg/crd/` | CRD registry, loading, metadata extraction, embedded type detection |
+| `pkg/parser/` | Template parsing, directive extraction |
+| `pkg/transform/` | Array-to-map transformation |
+| `pkg/template/` | Template rewriting, helper generation |
+| `pkg/detect/` | Shared types (DetectedCandidate) |
+| `pkg/fs/` | FileSystem interface for testability |
 
 ## Alternatives Considered
 
