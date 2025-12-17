@@ -207,7 +207,7 @@ func TestQuotePathEdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			got := quotePath(tt.input)
+			got := QuotePath(tt.input)
 			if got != tt.want {
 				t.Errorf("quotePath(%q) = %q, want %q", tt.input, got, tt.want)
 			}

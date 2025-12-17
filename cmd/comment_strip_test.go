@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/transform"
 )
 
 // TestCommentedExampleStripping tests the removal of commented-out YAML examples
@@ -55,10 +57,10 @@ func TestCommentedExampleEmptyArray(t *testing.T) {
 	}
 
 	var edits []ArrayEdit
-	findArrayEdits(doc, nil, candidates, &edits)
+	transform.FindArrayEdits(doc, nil, candidates, &edits)
 
 	// Apply edits
-	result := applyLineEdits(original, edits)
+	result := transform.ApplyLineEdits(original, edits)
 	resultStr := string(result)
 
 	// Verify: Commented examples after empty arrays should be removed
@@ -131,8 +133,8 @@ func TestCommentedExampleMultiLine(t *testing.T) {
 	}
 
 	var edits []ArrayEdit
-	findArrayEdits(doc, nil, candidates, &edits)
-	result := applyLineEdits(original, edits)
+	transform.FindArrayEdits(doc, nil, candidates, &edits)
+	result := transform.ApplyLineEdits(original, edits)
 	resultStr := string(result)
 
 	tests := []struct {
@@ -220,8 +222,8 @@ func TestCommentedExampleNested(t *testing.T) {
 	}
 
 	var edits []ArrayEdit
-	findArrayEdits(doc, nil, candidates, &edits)
-	result := applyLineEdits(original, edits)
+	transform.FindArrayEdits(doc, nil, candidates, &edits)
+	result := transform.ApplyLineEdits(original, edits)
 	resultStr := string(result)
 
 	tests := []struct {
@@ -300,8 +302,8 @@ app:
 	}
 
 	var edits []ArrayEdit
-	findArrayEdits(doc, nil, candidates, &edits)
-	result := applyLineEdits([]byte(original), edits)
+	transform.FindArrayEdits(doc, nil, candidates, &edits)
+	result := transform.ApplyLineEdits([]byte(original), edits)
 	resultStr := string(result)
 
 	// Verify structure is preserved

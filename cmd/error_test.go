@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/transform"
 )
 
 // TestCLIUnknownCommand tests that unknown commands produce an error
@@ -308,7 +310,7 @@ func TestTransformErrorCases(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Just verify it doesn't panic
-			result := transformArrayToMap(tt.arrayLines, tt.mergeKey)
+			result := transform.TransformArrayToMap(tt.arrayLines, tt.mergeKey)
 			_ = result
 		})
 	}
@@ -367,99 +369,6 @@ func TestGlobMatchingEdgeCases(t *testing.T) {
 			got := matchGlob(tt.pattern, tt.path)
 			if got != tt.want {
 				t.Errorf("matchGlob(%q, %q) = %v, want %v", tt.pattern, tt.path, got, tt.want)
-			}
-		})
-	}
-}
-
-// TestNeedsQuotingEdgeCases tests YAML quoting edge cases
-// Note: needsQuoting only checks for special characters, not YAML reserved words
-func TestNeedsQuotingEdgeCases(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		s    string
-		want bool
-	}{
-		{name: "empty string", s: "", want: true},
-		{name: "contains colon", s: "key:value", want: true},
-		{name: "contains hash", s: "value#comment", want: true},
-		{name: "contains bracket", s: "[value]", want: true},
-		{name: "contains brace", s: "{value}", want: true},
-		{name: "contains ampersand", s: "a&b", want: true},
-		{name: "contains asterisk", s: "a*b", want: true},
-		{name: "contains exclamation", s: "!important", want: true},
-		{name: "contains pipe", s: "a|b", want: true},
-		{name: "contains greater than", s: "a>b", want: true},
-		{name: "contains single quote", s: "it's", want: true},
-		{name: "contains double quote", s: `say "hi"`, want: true},
-		{name: "contains percent", s: "100%", want: true},
-		{name: "contains at sign", s: "@value", want: true},
-		{name: "contains backtick", s: "`code`", want: true},
-		{name: "normal string", s: "normalvalue", want: false},
-		{name: "string with dash", s: "my-value", want: false},
-		{name: "string with underscore", s: "my_value", want: false},
-		{name: "string with dot", s: "my.value", want: false},
-		{name: "alphanumeric", s: "value123", want: false},
-		// Note: YAML reserved words like null, true, false are NOT quoted by this function
-		// because it only checks for special characters
-		{name: "null (no special chars)", s: "null", want: false},
-		{name: "true (no special chars)", s: "true", want: false},
-		{name: "number (no special chars)", s: "123", want: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := needsQuoting(tt.s)
-			if got != tt.want {
-				t.Errorf("needsQuoting(%q) = %v, want %v", tt.s, got, tt.want)
-			}
-		})
-	}
-}
-
-// TestDotPathEdgeCases tests dotPath function edge cases
-func TestDotPathEdgeCases(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		parts []string
-		want  string
-	}{
-		{
-			name:  "empty slice",
-			parts: []string{},
-			want:  "",
-		},
-		{
-			name:  "single part",
-			parts: []string{"env"},
-			want:  "env",
-		},
-		{
-			name:  "two parts",
-			parts: []string{"spec", "env"},
-			want:  "spec.env",
-		},
-		{
-			name:  "many parts",
-			parts: []string{"a", "b", "c", "d", "e"},
-			want:  "a.b.c.d.e",
-		},
-		{
-			name:  "parts with dots already",
-			parts: []string{"a.b", "c"},
-			want:  "a.b.c",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := dotPath(tt.parts)
-			if got != tt.want {
-				t.Errorf("dotPath(%v) = %q, want %q", tt.parts, got, tt.want)
 			}
 		})
 	}

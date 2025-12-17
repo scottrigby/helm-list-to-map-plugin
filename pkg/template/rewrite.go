@@ -64,7 +64,7 @@ func ReplaceListBlocks(tpl, dotPath, mergeKey, _ string) (string, bool) {
 	// Helper call generator - just replaces toYaml with our helper, preserving the nindent
 	helperCall := func(indent int) string {
 		return fmt.Sprintf(`{{- include "chart.listmap.items" (dict "items" (index .Values %s) "key" %q) | nindent %d }}`,
-			quotePath(dotPath), mergeKey, indent)
+			QuotePath(dotPath), mergeKey, indent)
 	}
 
 	// Pattern 1: {{- toYaml .Values.X | nindent N }}
@@ -106,7 +106,7 @@ func ReplaceListBlocks(tpl, dotPath, mergeKey, _ string) (string, bool) {
 			return fmt.Sprintf(`%s{{- if (index .Values %s) }}
 %s%s:
 %s
-%s{{- end }}`, leadingSpace, quotePath(dotPath), leadingSpace, sectionName, helperCall(indent), leadingSpace)
+%s{{- end }}`, leadingSpace, QuotePath(dotPath), leadingSpace, sectionName, helperCall(indent), leadingSpace)
 		}
 		return match
 	})
@@ -137,13 +137,13 @@ func ReplaceListBlocks(tpl, dotPath, mergeKey, _ string) (string, bool) {
 			return fmt.Sprintf(`{{- if (index .Values %s) }}
 %s%s:
 %s
-{{- end }}`, quotePath(dotPath), leadingSpace, sectionName, helperCall(indent))
+{{- end }}`, QuotePath(dotPath), leadingSpace, sectionName, helperCall(indent))
 		}
 		return match
 	})
 
 	// Pattern 6: Existing old-style helper calls - update to new format
-	re6 := regexp.MustCompile(`\{\{-?\s*include\s+"chart\.\S+\.render"\s*\(dict\s+"\S+"\s*\(index\s+\.Values\s+` + regexp.QuoteMeta(quotePath(dotPath)) + `\)\)\s*\}\}`)
+	re6 := regexp.MustCompile(`\{\{-?\s*include\s+"chart\.\S+\.render"\s*\(dict\s+"\S+"\s*\(index\s+\.Values\s+` + regexp.QuoteMeta(QuotePath(dotPath)) + `\)\)\s*\}\}`)
 	if re6.MatchString(tpl) {
 		// Just mark as changed - these need manual review since we don't know the indent
 		tpl = re6.ReplaceAllString(tpl, helperCall(8)) // Default indent
@@ -185,7 +185,9 @@ func CheckTemplatePatterns(chartPath string, paths []PathInfo) map[string]bool {
 	return matched
 }
 
-func quotePath(dotPath string) string {
+// QuotePath converts a dotted path to quoted index format
+// e.g., "a.b.c" -> `"a" "b" "c"`
+func QuotePath(dotPath string) string {
 	parts := strings.Split(dotPath, ".")
 	var quoted []string
 	for _, p := range parts {

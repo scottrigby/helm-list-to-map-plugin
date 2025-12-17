@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/template"
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/transform"
 )
 
 func TestDetectBasicChart(t *testing.T) {
@@ -124,14 +127,14 @@ func TestConvertIdempotent(t *testing.T) {
 	}
 
 	var edits []ArrayEdit
-	findArrayEdits(doc, nil, candidates, &edits)
+	transform.FindArrayEdits(doc, nil, candidates, &edits)
 
 	if len(edits) == 0 {
 		t.Fatal("Expected edits for env array")
 	}
 
 	// Apply edits once
-	firstResult := applyLineEdits([]byte(original), edits)
+	firstResult := transform.ApplyLineEdits([]byte(original), edits)
 
 	// Write converted result to parse again
 	if err := os.WriteFile(valuesPath, firstResult, 0644); err != nil {
@@ -145,7 +148,7 @@ func TestConvertIdempotent(t *testing.T) {
 	}
 
 	var edits2 []ArrayEdit
-	findArrayEdits(doc2, nil, candidates, &edits2)
+	transform.FindArrayEdits(doc2, nil, candidates, &edits2)
 
 	// After conversion, there should be no more edits (already converted to map)
 	if len(edits2) > 0 {
@@ -224,7 +227,7 @@ func TestHelperGeneration(t *testing.T) {
 	setupTestEnv(t)
 
 	// Test that listMapHelper returns valid content
-	helper := listMapHelper()
+	helper := template.ListMapHelper()
 
 	requiredContent := []string{
 		"chart.listmap.items",
@@ -254,7 +257,7 @@ func TestQuotePath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			got := quotePath(tt.input)
+			got := template.QuotePath(tt.input)
 			if got != tt.want {
 				t.Errorf("quotePath(%q) = %q, want %q", tt.input, got, tt.want)
 			}
@@ -316,7 +319,7 @@ func TestFindArrayEdits(t *testing.T) {
 	}
 
 	var edits []ArrayEdit
-	findArrayEdits(doc, nil, candidates, &edits)
+	transform.FindArrayEdits(doc, nil, candidates, &edits)
 
 	// Should find edits for env, volumes, volumeMounts
 	if len(edits) < 3 {
@@ -356,7 +359,7 @@ func TestApplyLineEdits(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := string(applyLineEdits([]byte(tt.original), tt.edits))
+			got := string(transform.ApplyLineEdits([]byte(tt.original), tt.edits))
 			// For no/empty edits, should return original
 			if len(tt.edits) == 0 && got != tt.original {
 				t.Errorf("applyLineEdits() with no edits = %q, want %q", got, tt.original)
@@ -378,7 +381,7 @@ func TestCheckTemplatePatterns(t *testing.T) {
 		{DotPath: "nonexistent", MergeKey: "id"},
 	}
 
-	matched := checkTemplatePatterns(chartDir, paths)
+	matched := template.CheckTemplatePatterns(chartDir, paths)
 
 	// Should match env, volumes, volumeMounts (present in template)
 	// Should NOT match nonexistent (not in template)
