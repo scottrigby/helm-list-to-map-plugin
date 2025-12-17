@@ -14,7 +14,7 @@ This document analyzes the current codebase structure and proposes improvements 
 | ------- | -------------- | ------------------------------------------------------------------------- |
 | Phase 1 | ✅ Complete    | Extract core packages (pkg/transform, pkg/template, pkg/detect)           |
 | Phase 2 | ✅ Complete    | Wire cmd/ to use new packages, remove duplicate code (~800 lines removed) |
-| Phase 3 | 🔲 Not Started | Split cmd/main.go into command files (1:1 mapping)                        |
+| Phase 3 | ✅ Complete    | Split cmd/main.go into command files (1:1 mapping)                        |
 | Phase 4 | 🔲 Not Started | Move analyzer.go → pkg/k8s/, crd.go → pkg/crd/                            |
 | Phase 5 | 🔲 Not Started | Options structs, App context, eliminate global state                      |
 | Phase 6 | 🔲 Not Started | Interfaces for testability                                                |

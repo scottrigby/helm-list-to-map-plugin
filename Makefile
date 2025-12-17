@@ -37,13 +37,13 @@ deps:
 .PHONY: test
 test:
 	@echo "Running tests..."
-	@go test -v ./cmd/...
+	@go test -v ./cmd/... ./pkg/...
 
 # Run tests with coverage
 .PHONY: test-cover
 test-cover:
 	@echo "Running tests with coverage..."
-	@go test -v -coverprofile=coverage.out ./cmd/...
+	@go test -v -coverprofile=coverage.out ./cmd/... ./pkg/...
 	@go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report: coverage.html"
 
@@ -51,7 +51,7 @@ test-cover:
 .PHONY: test-short
 test-short:
 	@echo "Running tests (short mode)..."
-	@go test -v -short ./cmd/...
+	@go test -v -short ./cmd/... ./pkg/...
 
 # Run linter
 .PHONY: lint
@@ -63,5 +63,5 @@ lint:
 .PHONY: fmt
 fmt:
 	@echo "Formatting code..."
-	@goimports -w .
-	@go fmt ./...
+	@goimports -w cmd/ pkg/
+	@go fmt ./cmd/... ./pkg/...
