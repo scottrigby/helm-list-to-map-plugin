@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/crd"
 )
 
 // setupTestEnv creates an isolated HELM_CONFIG_HOME for tests
@@ -51,7 +53,7 @@ func copyChart(t *testing.T, srcChart string) string {
 // resetGlobalState resets global state between tests
 func resetGlobalState(t *testing.T) {
 	t.Helper()
-	globalCRDRegistry = NewCRDRegistry()
+	crd.ResetGlobalRegistry()
 }
 
 // getTestdataPath returns the absolute path to a testdata file

@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/crd"
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/k8s"
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/template"
 )
 
@@ -72,7 +74,7 @@ Examples:
 	}
 
 	// Use new programmatic detection via K8s API introspection
-	result, err := detectConversionCandidatesFull(root)
+	result, err := k8s.DetectConversionCandidatesFull(root)
 	if err != nil {
 		fatal(err)
 	}
@@ -81,7 +83,7 @@ Examples:
 	userDetected := scanForUserRules(root)
 
 	// Combine both sources
-	allDetected := make(map[string]DetectedCandidate)
+	allDetected := make(map[string]k8s.DetectedCandidate)
 	for _, c := range result.Candidates {
 		allDetected[c.ValuesPath] = c
 	}
@@ -92,14 +94,14 @@ Examples:
 	}
 
 	// Check values.yaml existence for each candidate
-	var allCandidates []DetectedCandidate
+	var allCandidates []k8s.DetectedCandidate
 	for _, c := range allDetected {
 		allCandidates = append(allCandidates, c)
 	}
-	allCandidates = checkCandidatesInValues(root, allCandidates)
+	allCandidates = k8s.CheckCandidatesInValues(root, allCandidates)
 
 	// Separate candidates with values vs template-only
-	var withValues, templateOnly []DetectedCandidate
+	var withValues, templateOnly []k8s.DetectedCandidate
 	for _, c := range allCandidates {
 		if c.ExistsInValues {
 			withValues = append(withValues, c)
@@ -156,10 +158,10 @@ Examples:
 	// Print warnings for undetected usages, grouped by category
 	if len(result.Undetected) > 0 {
 		// Group by category
-		crdNoKeys := filterByCategory(result.Undetected, CategoryCRDNoKeys)
-		k8sNoKeys := filterByCategory(result.Undetected, CategoryK8sNoKeys)
-		missingCRD := filterByCategory(result.Undetected, CategoryMissingCRD)
-		unknownType := filterByCategory(result.Undetected, CategoryUnknownType)
+		crdNoKeys := filterByCategory(result.Undetected, k8s.CategoryCRDNoKeys)
+		k8sNoKeys := filterByCategory(result.Undetected, k8s.CategoryK8sNoKeys)
+		missingCRD := filterByCategory(result.Undetected, k8s.CategoryMissingCRD)
+		unknownType := filterByCategory(result.Undetected, k8s.CategoryUnknownType)
 
 		// Arrays with known type but no merge keys (CRD or K8s)
 		knownArrays := append(crdNoKeys, k8sNoKeys...)
@@ -312,7 +314,7 @@ type nestedListWarning struct {
 
 // findNestedListFieldWarnings checks detected candidates for fields that contain nested lists
 // This helps users understand when they might want to break up large YAML blocks
-func findNestedListFieldWarnings(candidates []DetectedCandidate) []nestedListWarning {
+func findNestedListFieldWarnings(candidates []k8s.DetectedCandidate) []nestedListWarning {
 	var warnings []nestedListWarning
 
 	// Known K8s types that contain nested list fields
@@ -343,8 +345,8 @@ type CRDStatus struct {
 }
 
 // filterByCategory returns undetected usages matching the given category
-func filterByCategory(undetected []UndetectedUsage, category UndetectedCategory) []UndetectedUsage {
-	var result []UndetectedUsage
+func filterByCategory(undetected []k8s.UndetectedUsage, category k8s.UndetectedCategory) []k8s.UndetectedUsage {
+	var result []k8s.UndetectedUsage
 	for _, u := range undetected {
 		if u.Category == category {
 			result = append(result, u)
@@ -365,7 +367,7 @@ func getCommonCRDGroups() map[string]bool {
 	}
 
 	sourcesFile := filepath.Join(pluginDir, "common-crds.yaml")
-	sources, err := LoadCRDSources(sourcesFile)
+	sources, err := crd.LoadCRDSources(sourcesFile)
 	if err != nil {
 		// If we can't load common-crds.yaml, return empty set
 		return groups
@@ -389,7 +391,7 @@ func extractAPIGroup(apiVersionKind string) string {
 
 // collectMissingCRDs extracts unique Custom Resource types that don't have loaded CRDs
 // Also detects version mismatches (CRD loaded but wrong version)
-func collectMissingCRDs(undetected []UndetectedUsage) (missing []string, versionMismatches []CRDStatus) {
+func collectMissingCRDs(undetected []k8s.UndetectedUsage) (missing []string, versionMismatches []CRDStatus) {
 	seenMissing := make(map[string]bool)
 	seenMismatch := make(map[string]bool)
 
@@ -400,7 +402,7 @@ func collectMissingCRDs(undetected []UndetectedUsage) (missing []string, version
 		}
 
 		// Skip built-in K8s types (they don't need CRDs)
-		if resolveKubeAPIType(u.APIVersion, u.Kind) != nil {
+		if k8s.ResolveKubeAPIType(u.APIVersion, u.Kind) != nil {
 			continue
 		}
 
@@ -412,7 +414,7 @@ func collectMissingCRDs(undetected []UndetectedUsage) (missing []string, version
 		key := u.APIVersion + "/" + u.Kind
 
 		// Check if this is a version mismatch (CRD loaded but different version)
-		hasGroupKind, hasVersion, availableVersions := globalCRDRegistry.CheckVersionMismatch(u.APIVersion, u.Kind)
+		hasGroupKind, hasVersion, availableVersions := crd.GetGlobalRegistry().CheckVersionMismatch(u.APIVersion, u.Kind)
 		if hasGroupKind && !hasVersion {
 			// CRD exists but with different version
 			if !seenMismatch[key] {
@@ -436,8 +438,8 @@ func collectMissingCRDs(undetected []UndetectedUsage) (missing []string, version
 }
 
 // scanForUserRules scans templates using user-defined rules (for CRDs)
-func scanForUserRules(chartRoot string) []DetectedCandidate {
-	var detected []DetectedCandidate
+func scanForUserRules(chartRoot string) []k8s.DetectedCandidate {
+	var detected []k8s.DetectedCandidate
 	seen := make(map[string]bool)
 
 	// Only process user-defined rules (not built-in ones)
@@ -506,7 +508,7 @@ func scanForUserRules(chartRoot string) []DetectedCandidate {
 			}
 
 			seen[pathStr] = true
-			detected = append(detected, DetectedCandidate{
+			detected = append(detected, k8s.DetectedCandidate{
 				ValuesPath:  pathStr,
 				MergeKey:    uniqueKey,
 				ElementType: "(user rule)",
@@ -562,7 +564,7 @@ func runRecursiveDetect(umbrellaRoot string, verbose bool) {
 		fmt.Printf("\n=== Subchart: %s ===\n", dep.Name)
 
 		// Detect candidates
-		candidates, err := detectConversionCandidates(subchartPath)
+		candidates, err := k8s.DetectConversionCandidates(subchartPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  Error: %v\n", err)
 			continue
@@ -573,9 +575,9 @@ func runRecursiveDetect(umbrellaRoot string, verbose bool) {
 		candidates = append(candidates, userDetected...)
 
 		// Check template patterns
-		var pathInfos []PathInfo
+		var pathInfos []template.PathInfo
 		for _, c := range candidates {
-			pathInfos = append(pathInfos, PathInfo{
+			pathInfos = append(pathInfos, template.PathInfo{
 				DotPath:     c.ValuesPath,
 				MergeKey:    c.MergeKey,
 				SectionName: c.SectionName,
@@ -584,7 +586,7 @@ func runRecursiveDetect(umbrellaRoot string, verbose bool) {
 		matchedPaths := template.CheckTemplatePatterns(subchartPath, pathInfos)
 
 		// Report results
-		var detected, skipped []DetectedCandidate
+		var detected, skipped []k8s.DetectedCandidate
 		for _, c := range candidates {
 			if matchedPaths[c.ValuesPath] {
 				detected = append(detected, c)
@@ -599,10 +601,10 @@ func runRecursiveDetect(umbrellaRoot string, verbose bool) {
 		}
 
 		// Check values.yaml existence for detected candidates
-		detected = checkCandidatesInValues(subchartPath, detected)
+		detected = k8s.CheckCandidatesInValues(subchartPath, detected)
 
 		// Separate by values existence
-		var withValues, templateOnly []DetectedCandidate
+		var withValues, templateOnly []k8s.DetectedCandidate
 		for _, c := range detected {
 			if c.ExistsInValues {
 				withValues = append(withValues, c)

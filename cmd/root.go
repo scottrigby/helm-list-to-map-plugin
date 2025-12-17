@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/template"
-	"github.com/scottrigby/helm-list-to-map-plugin/pkg/transform"
 	"gopkg.in/yaml.v3"
 )
 
@@ -25,16 +24,10 @@ type Config struct {
 	SortKeys           bool   `yaml:"sortKeys"`
 }
 
-// PathInfo is now in pkg/template
-type PathInfo = template.PathInfo
-
-// ArrayEdit is now in pkg/transform
-type ArrayEdit = transform.ArrayEdit
-
 // SubchartConversion tracks what was converted in a subchart
 type SubchartConversion struct {
-	Name           string     // Subchart name (used as prefix in umbrella values)
-	ConvertedPaths []PathInfo // Paths that were converted
+	Name           string              // Subchart name (used as prefix in umbrella values)
+	ConvertedPaths []template.PathInfo // Paths that were converted
 }
 
 // ChartDependency represents a dependency from Chart.yaml
@@ -58,7 +51,7 @@ var (
 	configPath       string
 	recursive        bool
 	conf             Config
-	transformedPaths []PathInfo
+	transformedPaths []template.PathInfo
 )
 
 // Global flag for force overwrite (set by runLoadCRD)

@@ -109,3 +109,13 @@ func matchGlob(pattern, text string) bool {
 	}
 	return true
 }
+
+// getLastPathSegment returns the last segment of a dot-separated path
+// e.g., "spec.template.volumes" -> "volumes"
+func getLastPathSegment(path string) string {
+	parts := strings.Split(path, ".")
+	if len(parts) == 0 {
+		return path
+	}
+	return parts[len(parts)-1]
+}

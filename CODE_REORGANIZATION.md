@@ -15,41 +15,44 @@ This document analyzes the current codebase structure and proposes improvements 
 | Phase 1 | ✅ Complete    | Extract core packages (pkg/transform, pkg/template, pkg/detect)           |
 | Phase 2 | ✅ Complete    | Wire cmd/ to use new packages, remove duplicate code (~800 lines removed) |
 | Phase 3 | ✅ Complete    | Split cmd/main.go into command files (1:1 mapping)                        |
-| Phase 4 | 🔲 Not Started | Move analyzer.go → pkg/k8s/, crd.go → pkg/crd/                            |
+| Phase 4 | ✅ Complete    | Move analyzer.go → pkg/k8s/, crd.go → pkg/crd/, parser.go → pkg/parser/   |
 | Phase 5 | 🔲 Not Started | Options structs, App context, eliminate global state                      |
 | Phase 6 | 🔲 Not Started | Interfaces for testability                                                |
 
 ---
 
-## Current State Analysis
+## Current State Analysis (Post-Phase 4)
 
-### File Structure Overview (Updated)
+### File Structure Overview
 
-| File              | Lines | Purpose                                                |
-| ----------------- | ----- | ------------------------------------------------------ |
-| `cmd/main.go`     | ~1900 | CLI framework, commands, helpers (reduced from 2693)   |
-| `cmd/analyzer.go` | 819   | K8s type introspection, conversion candidate detection |
-| `cmd/crd.go`      | 724   | CRD registry, loading, metadata extraction             |
-| `cmd/parser.go`   | 435   | Template parsing, directive extraction                 |
-| `pkg/transform/`  | ✅    | Array-to-map transformation (extracted)                |
-| `pkg/template/`   | ✅    | Template rewriting, helper generation (extracted)      |
-| `pkg/detect/`     | ✅    | Shared types (DetectedCandidate)                       |
+**cmd/** - CLI layer only:
+| File | Purpose |
+| ----------------- | ------------------------------------------------- |
+| `cmd/root.go` | main(), usage(), command routing |
+| `cmd/detect.go` | runDetect, runRecursiveDetect |
+| `cmd/convert.go` | runConvert, runRecursiveConvert |
+| `cmd/load_crd.go` | runLoadCRD |
+| `cmd/list_crds.go`| runListCRDs |
+| `cmd/add_rule.go` | runAddRule |
+| `cmd/list_rules.go`| runListRules |
+| `cmd/helpers.go` | findChartRoot, loadValuesNode, matchRule, etc. |
+
+**pkg/** - Domain logic:
+| Package | Purpose |
+| ----------------- | ------------------------------------------------- |
+| `pkg/k8s/` | K8s type introspection, field schema navigation |
+| `pkg/crd/` | CRD registry, loading, metadata extraction |
+| `pkg/parser/` | Template parsing, directive extraction |
+| `pkg/transform/` | Array-to-map transformation |
+| `pkg/template/` | Template rewriting, helper generation |
+| `pkg/detect/` | Shared types (DetectedCandidate) |
 
 ### Remaining Issues
 
-#### 1. Monolithic main.go (~1900 lines)
-
-Still contains 8 command implementations that should be split:
-
-- `runDetect`, `runRecursiveDetect`
-- `runConvert`, `runRecursiveConvert`
-- `runLoadCRD`, `runListCRDs`
-- `runAddRule`, `runListRules`
-
-#### 2. Global State
+#### 1. Global State (Phase 5 target)
 
 ```go
-// main.go - Package-level mutable state (still present)
+// cmd/root.go - Package-level mutable state
 var (
     subcmd           string
     chartDir         string
@@ -58,25 +61,24 @@ var (
     configPath       string
     recursive        bool
     conf             Config
-    transformedPaths []PathInfo
+    transformedPaths []template.PathInfo
 )
 
-// crd.go
+// pkg/crd/registry.go
 var globalCRDRegistry = NewCRDRegistry()
-
-// analyzer.go
-var kubeTypeRegistry map[string]reflect.Type
 ```
 
-#### 3. Domain Logic in cmd/
+#### 2. No Interfaces for Testing (Phase 6 target)
 
-`analyzer.go` and `crd.go` contain domain logic (K8s introspection, CRD handling) that should be in `pkg/` for reusability and testability.
+Direct file system and HTTP access makes unit testing harder.
 
 ---
 
-## Phase 3: Split Command Files (Next)
+## Phase 3: Split Command Files (Complete)
 
 **Recommended Model: Sonnet** - Mechanical file splitting
+
+> ✅ Completed: Split cmd/main.go into 8 focused command files with 1:1 mapping.
 
 ### Target Structure
 
@@ -91,10 +93,7 @@ cmd/
 ├── list_crds.go      # runListCRDs
 ├── add_rule.go       # runAddRule
 ├── list_rules.go     # runListRules
-├── helpers.go        # findChartRoot, loadValuesNode, backupFile, matchRule, matchGlob
-├── analyzer.go       # (keep for now, move in Phase 4)
-├── crd.go            # (keep for now, move in Phase 4)
-└── parser.go         # (keep as-is)
+└── helpers.go        # findChartRoot, loadValuesNode, backupFile, matchRule, matchGlob
 ```
 
 ### Rationale for 1:1 Mapping
@@ -118,9 +117,12 @@ Keep global variables in `root.go` for now (Phase 5 will convert to Options stru
 
 ---
 
-## Phase 4: Extract Domain Packages
+## Phase 4: Extract Domain Packages (Complete)
 
 **Recommended Model: Sonnet**
+
+> ✅ Completed: Extracted K8s introspection, CRD handling, and template parsing into domain packages.
+> Removed all temporary type aliases - cmd/ now uses direct package references.
 
 ### Move analyzer.go → pkg/k8s/
 
@@ -259,7 +261,7 @@ These are independent improvements that can be done in any phase:
 | Task                             | Model | Effort | File                    |
 | -------------------------------- | ----- | ------ | ----------------------- |
 | Precompile regex patterns        | Haiku | Low    | pkg/template/rewrite.go |
-| HTTP client timeout              | Haiku | Low    | cmd/crd.go              |
+| HTTP client timeout              | Haiku | Low    | pkg/crd/load.go         |
 | Document Helm-specific functions | Haiku | Low    | pkg/template/helper.go  |
 
 ---
@@ -300,9 +302,9 @@ These test the CLI end-to-end, not individual packages. The `pkg/` tests use inl
 
 ```bash
 # After each change:
-go build ./...
-go test ./...
-golangci-lint run
+make build
+make test
+make lint
 ```
 
 ---

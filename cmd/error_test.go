@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/crd"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -242,7 +243,7 @@ func TestCRDRegistryLoadFromFileErrors(t *testing.T) {
 	t.Parallel()
 
 	// Test loading from non-existent file
-	reg := NewCRDRegistry()
+	reg := crd.NewCRDRegistry()
 	err := reg.LoadFromFile("/nonexistent/path.yaml")
 	if err == nil {
 		t.Error("expected error for non-existent file")
@@ -260,7 +261,7 @@ func TestCRDRegistryLoadFromFileErrors(t *testing.T) {
 func TestCRDRegistryLoadFromDirectoryErrors(t *testing.T) {
 	t.Parallel()
 
-	reg := NewCRDRegistry()
+	reg := crd.NewCRDRegistry()
 
 	// Test loading from non-existent directory
 	err := reg.LoadFromDirectory("/nonexistent/directory")

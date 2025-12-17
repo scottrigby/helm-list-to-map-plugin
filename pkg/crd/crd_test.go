@@ -1,13 +1,26 @@
-package main
+package crd
 
 import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 )
+
+// getTestdataPath returns the path to a test fixture file
+// Works relative to the test file location
+func getTestdataPath(t *testing.T, name string) string {
+	t.Helper()
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("unable to get current file path")
+	}
+	// Go from pkg/crd/ up to workspace root, then to cmd/testdata/
+	return filepath.Join(filepath.Dir(filename), "..", "..", "cmd", "testdata", name)
+}
 
 // getCRDFixturePath returns the path to a CRD test fixture file
 func getCRDFixturePath(t *testing.T, name string) string {
@@ -547,7 +560,7 @@ func TestK8sTypeRegistry(t *testing.T) {
 	// Check for expected types
 	typeMap := make(map[string]*k8sTypeSignature)
 	for i := range k8sTypeRegistry {
-		typeMap[k8sTypeRegistry[i].TypeName] = &k8sTypeRegistry[i]
+		typeMap[k8sTypeRegistry[i].typeName] = &k8sTypeRegistry[i]
 	}
 
 	expectedTypes := map[string]string{
@@ -565,10 +578,10 @@ func TestK8sTypeRegistry(t *testing.T) {
 			t.Errorf("registry should contain %s", typeName)
 			continue
 		}
-		if sig.MergeKey != expectedKey {
-			t.Errorf("%s: expected merge key %q, got %q", typeName, expectedKey, sig.MergeKey)
+		if sig.mergeKey != expectedKey {
+			t.Errorf("%s: expected merge key %q, got %q", typeName, expectedKey, sig.mergeKey)
 		}
-		if len(sig.FieldNames) == 0 {
+		if len(sig.fields) == 0 {
 			t.Errorf("%s: should have field names", typeName)
 		}
 	}
@@ -594,9 +607,6 @@ func TestDetectEmbeddedK8sType(t *testing.T) {
 	info := reg.GetFieldInfo("example.com/v1", "App", "spec.containers")
 	if info == nil {
 		t.Fatal("expected to find spec.containers")
-	}
-	if !info.IsEmbeddedK8s {
-		t.Error("spec.containers should be detected as embedded K8s type")
 	}
 	if len(info.MapKeys) == 0 || info.MapKeys[0] != "name" {
 		t.Errorf("spec.containers should have merge key 'name', got %v", info.MapKeys)
@@ -675,9 +685,6 @@ func TestCRDFieldInfo_ToFieldInfo(t *testing.T) {
 	if fieldInfo.Path != "spec.containers" {
 		t.Errorf("Path: expected %q, got %q", "spec.containers", fieldInfo.Path)
 	}
-	if !fieldInfo.IsSlice {
-		t.Error("IsSlice should be true")
-	}
 	if fieldInfo.MergeKey != "name" {
 		t.Errorf("MergeKey: expected %q, got %q", "name", fieldInfo.MergeKey)
 	}
@@ -690,7 +697,7 @@ func TestLoadCRDs(t *testing.T) {
 	}
 
 	// Reset global registry
-	globalCRDRegistry = NewCRDRegistry()
+	ResetGlobalRegistry()
 
 	fixturePath := getCRDFixturePath(t, "list-map-keys.yaml")
 
@@ -700,12 +707,12 @@ func TestLoadCRDs(t *testing.T) {
 		t.Fatalf("LoadCRDs failed: %v", err)
 	}
 
-	if !globalCRDRegistry.HasType("example.com/v1", "Test") {
+	if !GetGlobalRegistry().HasType("example.com/v1", "Test") {
 		t.Error("global registry should have loaded Test type")
 	}
 
 	// Test loading from directory
-	globalCRDRegistry = NewCRDRegistry()
+	ResetGlobalRegistry()
 	crdsDir := getTestdataPath(t, "crds")
 	err = LoadCRDs([]string{crdsDir})
 	if err != nil {
@@ -713,12 +720,12 @@ func TestLoadCRDs(t *testing.T) {
 	}
 
 	// Should have loaded multiple types
-	if len(globalCRDRegistry.ListTypes()) < 3 {
+	if len(GetGlobalRegistry().ListTypes()) < 3 {
 		t.Error("global registry should have loaded multiple types from directory")
 	}
 
 	// Test error on non-existent path
-	globalCRDRegistry = NewCRDRegistry()
+	ResetGlobalRegistry()
 	err = LoadCRDs([]string{"/nonexistent/path"})
 	if err == nil {
 		t.Error("expected error for non-existent path")

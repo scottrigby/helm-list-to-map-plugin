@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/k8s"
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/transform"
 )
 
@@ -37,7 +38,7 @@ func TestCommentedExampleEmptyArray(t *testing.T) {
 	}
 
 	// Set up candidates for fields we want to convert
-	candidates := map[string]DetectedCandidate{
+	candidates := map[string]k8s.DetectedCandidate{
 		"env": {
 			ValuesPath: "env",
 			MergeKey:   "name",
@@ -56,7 +57,7 @@ func TestCommentedExampleEmptyArray(t *testing.T) {
 		},
 	}
 
-	var edits []ArrayEdit
+	var edits []transform.ArrayEdit
 	transform.FindArrayEdits(doc, nil, candidates, &edits)
 
 	// Apply edits
@@ -117,7 +118,7 @@ func TestCommentedExampleMultiLine(t *testing.T) {
 		t.Fatalf("loadValuesNode() error = %v", err)
 	}
 
-	candidates := map[string]DetectedCandidate{
+	candidates := map[string]k8s.DetectedCandidate{
 		"initContainers": {
 			ValuesPath: "initContainers",
 			MergeKey:   "name",
@@ -132,7 +133,7 @@ func TestCommentedExampleMultiLine(t *testing.T) {
 		},
 	}
 
-	var edits []ArrayEdit
+	var edits []transform.ArrayEdit
 	transform.FindArrayEdits(doc, nil, candidates, &edits)
 	result := transform.ApplyLineEdits(original, edits)
 	resultStr := string(result)
@@ -198,7 +199,7 @@ func TestCommentedExampleNested(t *testing.T) {
 	}
 
 	// Candidates for nested paths
-	candidates := map[string]DetectedCandidate{
+	candidates := map[string]k8s.DetectedCandidate{
 		"database.primary.env": {
 			ValuesPath: "database.primary.env",
 			MergeKey:   "name",
@@ -221,7 +222,7 @@ func TestCommentedExampleNested(t *testing.T) {
 		},
 	}
 
-	var edits []ArrayEdit
+	var edits []transform.ArrayEdit
 	transform.FindArrayEdits(doc, nil, candidates, &edits)
 	result := transform.ApplyLineEdits(original, edits)
 	resultStr := string(result)
@@ -294,14 +295,14 @@ app:
 		t.Fatalf("loadValuesNode() error = %v", err)
 	}
 
-	candidates := map[string]DetectedCandidate{
+	candidates := map[string]k8s.DetectedCandidate{
 		"app.env": {
 			ValuesPath: "app.env",
 			MergeKey:   "name",
 		},
 	}
 
-	var edits []ArrayEdit
+	var edits []transform.ArrayEdit
 	transform.FindArrayEdits(doc, nil, candidates, &edits)
 	result := transform.ApplyLineEdits([]byte(original), edits)
 	resultStr := string(result)

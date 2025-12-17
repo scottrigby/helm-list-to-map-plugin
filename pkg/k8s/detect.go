@@ -1,246 +1,19 @@
-package main
+package k8s
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"strings"
 
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/crd"
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/detect"
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/parser"
 	"gopkg.in/yaml.v3"
-	"k8s.io/apimachinery/pkg/util/strategicpatch"
-	"k8s.io/client-go/kubernetes/scheme"
 )
 
-// kubeTypeRegistry maps apiVersion/kind to Go reflect.Type
-// This is automatically populated from k8s.io/client-go/kubernetes/scheme
-// which includes ALL built-in Kubernetes types (core, apps, batch, networking, etc.)
-var kubeTypeRegistry map[string]reflect.Type
-
-func init() {
-	kubeTypeRegistry = make(map[string]reflect.Type)
-
-	// Populate registry from the official Kubernetes scheme
-	// This automatically includes all built-in K8s types across all API versions
-	for gvk, typ := range scheme.Scheme.AllKnownTypes() {
-		// Convert GroupVersionKind to our apiVersion/kind format
-		// Core API (empty group): apiVersion = "v1"
-		// Other APIs: apiVersion = "group/version" (e.g., "apps/v1")
-		var apiVersion string
-		if gvk.Group == "" {
-			apiVersion = gvk.Version
-		} else {
-			apiVersion = gvk.Group + "/" + gvk.Version
-		}
-
-		key := apiVersion + "/" + gvk.Kind
-		kubeTypeRegistry[key] = typ
-	}
-}
-
-// resolveKubeAPIType maps apiVersion + kind to a Go reflect.Type
-// Returns nil if the type is not recognized (e.g., CRDs)
-func resolveKubeAPIType(apiVersion, kind string) reflect.Type {
-	key := apiVersion + "/" + kind
-	return kubeTypeRegistry[key]
-}
-
-// FieldInfo contains information about a K8s API field
-type FieldInfo struct {
-	Path        string       // YAML path (e.g., spec.template.spec.volumes)
-	FieldType   reflect.Type // Go type of the field
-	ElementType reflect.Type // If slice, the element type
-	IsSlice     bool
-	MergeKey    string // The patchMergeKey if this is a strategic merge patch list
-}
-
-// navigateFieldSchema traverses a K8s type hierarchy following a YAML path
-// and returns information about the field at that path.
-// Uses K8s strategicpatch API to get merge keys programmatically.
-func navigateFieldSchema(rootType reflect.Type, yamlPath string) (*FieldInfo, error) {
-	if rootType == nil {
-		return nil, fmt.Errorf("nil root type")
-	}
-
-	parts := strings.Split(yamlPath, ".")
-	currentType := rootType
-
-	// Track parent structs for strategicpatch lookups
-	// parentType is the struct containing the slice field
-	var parentType reflect.Type
-
-	for i, part := range parts {
-		// Handle pointer types
-		if currentType.Kind() == reflect.Ptr {
-			currentType = currentType.Elem()
-		}
-
-		// Handle slice types - if we see [], we need to get the element type
-		part = strings.TrimSuffix(part, "[]")
-
-		if currentType.Kind() != reflect.Struct {
-			return nil, fmt.Errorf("expected struct at %s, got %s", strings.Join(parts[:i], "."), currentType.Kind())
-		}
-
-		// Track parent type before navigating into the field
-		parentType = currentType
-
-		// Find field by json tag
-		field, found := findFieldByJSONTag(currentType, part)
-		if !found {
-			return nil, fmt.Errorf("field %q not found in %s", part, currentType.Name())
-		}
-
-		currentType = field.Type
-
-		// If this is a slice and not the last element, get the element type
-		if currentType.Kind() == reflect.Slice && i < len(parts)-1 {
-			currentType = currentType.Elem()
-		}
-	}
-
-	// Build result
-	info := &FieldInfo{
-		Path:      yamlPath,
-		FieldType: currentType,
-	}
-
-	// Handle pointer at final position
-	if currentType.Kind() == reflect.Ptr {
-		currentType = currentType.Elem()
-		info.FieldType = currentType
-	}
-
-	if currentType.Kind() == reflect.Slice {
-		info.IsSlice = true
-		info.ElementType = currentType.Elem()
-		if info.ElementType.Kind() == reflect.Ptr {
-			info.ElementType = info.ElementType.Elem()
-		}
-
-		// Get merge key using K8s strategicpatch API
-		lastPart := parts[len(parts)-1]
-		lastPart = strings.TrimSuffix(lastPart, "[]")
-		info.MergeKey = getMergeKeyFromStrategicPatch(parentType, lastPart)
-
-		// Fall back to hardcoded map for types without official K8s merge keys
-		// (e.g., tolerations which uses atomic replacement by default)
-		if info.MergeKey == "" {
-			info.MergeKey = GetK8sTypeMergeKey(info.ElementType)
-		}
-	}
-
-	return info, nil
-}
-
-// getMergeKeyFromStrategicPatch uses K8s strategicpatch API to get merge key for a slice field
-func getMergeKeyFromStrategicPatch(structType reflect.Type, fieldName string) string {
-	if structType == nil {
-		return ""
-	}
-
-	// Handle pointer types
-	if structType.Kind() == reflect.Ptr {
-		structType = structType.Elem()
-	}
-
-	if structType.Kind() != reflect.Struct {
-		return ""
-	}
-
-	// Create a zero value of the struct type for strategicpatch lookup
-	structValue := reflect.New(structType).Elem().Interface()
-
-	patchMeta, err := strategicpatch.NewPatchMetaFromStruct(structValue)
-	if err != nil {
-		return ""
-	}
-
-	// Look up the merge key for this slice field
-	_, pm, err := patchMeta.LookupPatchMetadataForSlice(fieldName)
-	if err != nil {
-		return ""
-	}
-
-	return pm.GetPatchMergeKey()
-}
-
-// findFieldByJSONTag finds a struct field by its json tag name
-// Also returns the patchMergeKey tag if present
-func findFieldByJSONTag(structType reflect.Type, jsonName string) (reflect.StructField, bool) {
-	for i := 0; i < structType.NumField(); i++ {
-		field := structType.Field(i)
-		tag := field.Tag.Get("json")
-		if tag == "" {
-			continue
-		}
-
-		// Parse json tag (format: "name,omitempty" or "name" or ",inline")
-		tagParts := strings.Split(tag, ",")
-		tagName := tagParts[0]
-
-		if tagName == jsonName {
-			return field, true
-		}
-
-		// Handle inline structs
-		if tagName == "" && len(tagParts) > 1 && tagParts[1] == "inline" {
-			// Recursively search in embedded struct
-			embeddedType := field.Type
-			if embeddedType.Kind() == reflect.Ptr {
-				embeddedType = embeddedType.Elem()
-			}
-			if embeddedType.Kind() == reflect.Struct {
-				if f, ok := findFieldByJSONTag(embeddedType, jsonName); ok {
-					return f, true
-				}
-			}
-		}
-	}
-	return reflect.StructField{}, false
-}
-
-// FieldCheckResult represents the result of checking a field's type
-type FieldCheckResult int
-
-const (
-	FieldNotFound     FieldCheckResult = iota // Field doesn't exist or can't be navigated
-	FieldNotSlice                             // Field exists but is not a slice (map, struct, scalar)
-	FieldSliceNoKey                           // Field is a slice but has no patchMergeKey
-	FieldSliceWithKey                         // Field is a slice with a patchMergeKey (convertible)
-)
-
-// checkFieldType determines the type and convertibility of a field at the given YAML path
-func checkFieldType(rootType reflect.Type, yamlPath string) (FieldCheckResult, *FieldInfo) {
-	info, err := navigateFieldSchema(rootType, yamlPath)
-	if err != nil {
-		return FieldNotFound, nil
-	}
-
-	if !info.IsSlice {
-		return FieldNotSlice, info
-	}
-
-	if info.MergeKey == "" {
-		return FieldSliceNoKey, info
-	}
-
-	return FieldSliceWithKey, info
-}
-
-// isConvertibleField checks if a field at the given YAML path is a convertible list
-// A field is convertible if it's a slice with a patchMergeKey defined
-func isConvertibleField(rootType reflect.Type, yamlPath string) *FieldInfo {
-	result, info := checkFieldType(rootType, yamlPath)
-	if result == FieldSliceWithKey {
-		return info
-	}
-	return nil
-}
-
-// DetectedCandidate is now in pkg/detect
+// DetectedCandidate is exported from pkg/detect
 type DetectedCandidate = detect.DetectedCandidate
 
 // UndetectedCategory represents why a field couldn't be auto-detected
@@ -286,7 +59,7 @@ type DetectionResult struct {
 
 // detectConversionCandidates scans templates for convertible fields using K8s API introspection
 // and CRD registry lookup
-func detectConversionCandidates(chartRoot string) ([]DetectedCandidate, error) {
+func DetectConversionCandidates(chartRoot string) ([]DetectedCandidate, error) {
 	var candidates []DetectedCandidate
 	seen := make(map[string]bool) // dedup by valuesPath
 
@@ -301,14 +74,19 @@ func detectConversionCandidates(chartRoot string) ([]DetectedCandidate, error) {
 		}
 
 		// Parse template file
-		parsed, err := parseTemplateFile(path)
+		parsed, err := parser.ParseTemplateFile(path)
 		if err != nil {
 			return nil // Skip problematic files
 		}
 
+		// Resolve Go type from apiVersion/kind (parser doesn't do this to avoid import cycle)
+		if parsed.APIVersion != "" && parsed.Kind != "" && parsed.GoType == nil {
+			parsed.GoType = ResolveKubeAPIType(parsed.APIVersion, parsed.Kind)
+		}
+
 		// Check if we can resolve this type (either built-in K8s or CRD)
 		hasCRDType := parsed.APIVersion != "" && parsed.Kind != "" &&
-			globalCRDRegistry.HasType(parsed.APIVersion, parsed.Kind)
+			crd.GetGlobalRegistry().HasType(parsed.APIVersion, parsed.Kind)
 
 		// Skip if no K8s type resolved and no CRD type available
 		if parsed.GoType == nil && !hasCRDType {
@@ -318,12 +96,12 @@ func detectConversionCandidates(chartRoot string) ([]DetectedCandidate, error) {
 		// Process each directive
 		for _, directive := range parsed.Directives {
 			// Extract what .Values paths are being used
-			var valuesUsages []ValuesUsage
-			if hasIncludeDirective(directive.Content) {
+			var valuesUsages []parser.ValuesUsage
+			if parser.HasIncludeDirective(directive.Content) {
 				visited := make(map[string]bool)
-				valuesUsages = followIncludeChain(templatesDir, directive.Content, directive.WithContext, visited)
+				valuesUsages = parser.FollowIncludeChain(templatesDir, directive.Content, directive.WithContext, visited)
 			} else {
-				valuesUsages = analyzeDirectiveContent(directive.Content, directive.WithContext)
+				valuesUsages = parser.AnalyzeDirectiveContent(directive.Content, directive.WithContext)
 			}
 
 			for _, usage := range valuesUsages {
@@ -350,16 +128,16 @@ func detectConversionCandidates(chartRoot string) ([]DetectedCandidate, error) {
 					// Rare case: directive at root level with no parent keys
 					continue
 				}
-				sectionName := getLastPathSegment(usage.ValuesPath)
+				sectionName := GetLastPathSegment(usage.ValuesPath)
 
 				// Check if this path points to a convertible field
 				// Try built-in K8s types first, then CRD registry
 				var fieldInfo *FieldInfo
 				if parsed.GoType != nil {
-					fieldInfo = isConvertibleField(parsed.GoType, fullYAMLPath)
+					fieldInfo = IsConvertibleField(parsed.GoType, fullYAMLPath)
 				}
 				if fieldInfo == nil && hasCRDType {
-					fieldInfo = isConvertibleCRDField(parsed.APIVersion, parsed.Kind, fullYAMLPath)
+					fieldInfo = convertCRDFieldInfo(crd.IsConvertibleCRDField(parsed.APIVersion, parsed.Kind, fullYAMLPath))
 				}
 				if fieldInfo == nil {
 					continue
@@ -370,7 +148,7 @@ func detectConversionCandidates(chartRoot string) ([]DetectedCandidate, error) {
 				// Build element type name
 				var elemTypeName string
 				if fieldInfo.ElementType != nil {
-					elemTypeName = formatTypeName(fieldInfo.ElementType)
+					elemTypeName = FormatTypeName(fieldInfo.ElementType)
 				} else {
 					elemTypeName = "map[string]interface{}" // CRD types don't have Go types
 				}
@@ -396,23 +174,8 @@ func detectConversionCandidates(chartRoot string) ([]DetectedCandidate, error) {
 	return candidates, err
 }
 
-// formatTypeName formats a reflect.Type as a short package.Type string
-func formatTypeName(t reflect.Type) string {
-	if t == nil {
-		return ""
-	}
-	pkgPath := t.PkgPath()
-	typeName := t.Name()
-	if strings.Contains(pkgPath, "k8s.io/api/") {
-		shortPkg := strings.TrimPrefix(pkgPath, "k8s.io/api/")
-		shortPkg = strings.ReplaceAll(shortPkg, "/", "")
-		return shortPkg + "." + typeName
-	}
-	return typeName
-}
-
-// getLastPathSegment returns the last segment of a dot-separated path
-func getLastPathSegment(path string) string {
+// GetLastPathSegment returns the last segment of a dot-separated path
+func GetLastPathSegment(path string) string {
 	parts := strings.Split(path, ".")
 	if len(parts) == 0 {
 		return path
@@ -422,7 +185,7 @@ func getLastPathSegment(path string) string {
 
 // detectConversionCandidatesFull scans templates and returns full detection results including
 // undetected usages and partial templates
-func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) {
+func DetectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) {
 	result := &DetectionResult{}
 	seen := make(map[string]bool)           // dedup candidates by valuesPath
 	seenUndetected := make(map[string]bool) // dedup undetected by valuesPath
@@ -430,7 +193,7 @@ func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) 
 	templatesDir := filepath.Join(chartRoot, "templates")
 
 	// First pass: scan for partial templates
-	partials, includeMap := scanPartialTemplates(templatesDir)
+	partials, includeMap := ScanPartialTemplates(templatesDir)
 	result.Partials = partials
 
 	// Second pass: scan resource templates
@@ -443,20 +206,25 @@ func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) 
 		}
 
 		// Parse template file
-		parsed, err := parseTemplateFile(path)
+		parsed, err := parser.ParseTemplateFile(path)
 		if err != nil {
 			return nil // Skip problematic files
+		}
+
+		// Resolve Go type from apiVersion/kind (parser doesn't do this to avoid import cycle)
+		if parsed.APIVersion != "" && parsed.Kind != "" && parsed.GoType == nil {
+			parsed.GoType = ResolveKubeAPIType(parsed.APIVersion, parsed.Kind)
 		}
 
 		templateFile := filepath.Base(path)
 
 		// Check if we can resolve this type (either built-in K8s or CRD)
 		hasCRDType := parsed.APIVersion != "" && parsed.Kind != "" &&
-			globalCRDRegistry.HasType(parsed.APIVersion, parsed.Kind)
+			crd.GetGlobalRegistry().HasType(parsed.APIVersion, parsed.Kind)
 
 		// Track which partials are included from this resource template
 		for _, directive := range parsed.Directives {
-			if hasIncludeDirective(directive.Content) {
+			if parser.HasIncludeDirective(directive.Content) {
 				includedNames := extractIncludeNames(directive.Content)
 				for _, name := range includedNames {
 					includeMap[name] = append(includeMap[name], templateFile)
@@ -468,12 +236,12 @@ func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) 
 		if parsed.GoType == nil && !hasCRDType {
 			// Still scan for .Values list usages to report as undetected
 			for _, directive := range parsed.Directives {
-				var valuesUsages []ValuesUsage
-				if hasIncludeDirective(directive.Content) {
+				var valuesUsages []parser.ValuesUsage
+				if parser.HasIncludeDirective(directive.Content) {
 					visited := make(map[string]bool)
-					valuesUsages = followIncludeChain(templatesDir, directive.Content, directive.WithContext, visited)
+					valuesUsages = parser.FollowIncludeChain(templatesDir, directive.Content, directive.WithContext, visited)
 				} else {
-					valuesUsages = analyzeDirectiveContent(directive.Content, directive.WithContext)
+					valuesUsages = parser.AnalyzeDirectiveContent(directive.Content, directive.WithContext)
 				}
 
 				for _, usage := range valuesUsages {
@@ -515,12 +283,12 @@ func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) 
 		// Process each directive for convertible fields
 		for _, directive := range parsed.Directives {
 			// Extract what .Values paths are being used
-			var valuesUsages []ValuesUsage
-			if hasIncludeDirective(directive.Content) {
+			var valuesUsages []parser.ValuesUsage
+			if parser.HasIncludeDirective(directive.Content) {
 				visited := make(map[string]bool)
-				valuesUsages = followIncludeChain(templatesDir, directive.Content, directive.WithContext, visited)
+				valuesUsages = parser.FollowIncludeChain(templatesDir, directive.Content, directive.WithContext, visited)
 			} else {
-				valuesUsages = analyzeDirectiveContent(directive.Content, directive.WithContext)
+				valuesUsages = parser.AnalyzeDirectiveContent(directive.Content, directive.WithContext)
 			}
 
 			for _, usage := range valuesUsages {
@@ -547,14 +315,14 @@ func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) 
 					// Rare case: directive at root level with no parent keys
 					continue
 				}
-				sectionName := getLastPathSegment(usage.ValuesPath)
+				sectionName := GetLastPathSegment(usage.ValuesPath)
 
 				// Check if this path points to a convertible field
 				// Try built-in K8s types first, then CRD registry
 				var fieldInfo *FieldInfo
 				fieldCheck := FieldNotFound
 				if parsed.GoType != nil {
-					fieldCheck, fieldInfo = checkFieldType(parsed.GoType, fullYAMLPath)
+					fieldCheck, fieldInfo = CheckFieldType(parsed.GoType, fullYAMLPath)
 				}
 				// If it's not a slice in the K8s type, skip it entirely - it's not a list field
 				// (e.g., resources, affinity, nodeSelector are structs/maps, not lists)
@@ -564,9 +332,9 @@ func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) 
 				// For slices without merge key, try CRD registry as fallback
 				// Also try CRD if K8s type exists but has no patchMergeKey
 				if (fieldInfo == nil || fieldInfo.MergeKey == "") && hasCRDType {
-					crdInfo := isConvertibleCRDField(parsed.APIVersion, parsed.Kind, fullYAMLPath)
+					crdInfo := crd.IsConvertibleCRDField(parsed.APIVersion, parsed.Kind, fullYAMLPath)
 					if crdInfo != nil {
-						fieldInfo = crdInfo
+						fieldInfo = convertCRDFieldInfo(crdInfo)
 					}
 				}
 
@@ -580,7 +348,7 @@ func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) 
 					// an array in the CRD schema. toYaml is used for maps, objects, AND arrays - we
 					// shouldn't suggest conversion for non-array fields.
 					if hasCRDType && fieldCheck != FieldSliceNoKey {
-						isArray := isCRDArrayField(parsed.APIVersion, parsed.Kind, fullYAMLPath)
+						isArray := crd.IsCRDArrayField(parsed.APIVersion, parsed.Kind, fullYAMLPath)
 						if !isArray {
 							// Not an array in CRD schema - skip (it's a map/object being rendered)
 							continue
@@ -623,7 +391,7 @@ func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) 
 				// Build element type name
 				var elemTypeName string
 				if fieldInfo.ElementType != nil {
-					elemTypeName = formatTypeName(fieldInfo.ElementType)
+					elemTypeName = FormatTypeName(fieldInfo.ElementType)
 				} else {
 					elemTypeName = "map[string]interface{}" // CRD types don't have Go types
 				}
@@ -668,7 +436,7 @@ func detectConversionCandidatesFull(chartRoot string) (*DetectionResult, error) 
 }
 
 // scanPartialTemplates scans for .tpl files and extracts partial template information
-func scanPartialTemplates(templatesDir string) ([]PartialTemplate, map[string][]string) {
+func ScanPartialTemplates(templatesDir string) ([]PartialTemplate, map[string][]string) {
 	var partials []PartialTemplate
 	includeMap := make(map[string][]string) // template name -> files that include it
 
@@ -751,7 +519,7 @@ func extractIncludeNames(content string) []string {
 
 // valuesPathExists checks if a dot-notation path exists in values.yaml
 // Returns (exists, isArray, error)
-func valuesPathExists(chartRoot, dotPath string) (bool, bool, error) {
+func ValuesPathExists(chartRoot, dotPath string) (bool, bool, error) {
 	valuesPath := filepath.Join(chartRoot, "values.yaml")
 	data, err := os.ReadFile(valuesPath)
 	if err != nil {
@@ -803,10 +571,10 @@ func findYAMLNodeAtPath(node *yaml.Node, path []string) *yaml.Node {
 }
 
 // checkCandidatesInValues updates candidates with ExistsInValues based on values.yaml
-func checkCandidatesInValues(chartRoot string, candidates []DetectedCandidate) []DetectedCandidate {
+func CheckCandidatesInValues(chartRoot string, candidates []DetectedCandidate) []DetectedCandidate {
 	result := make([]DetectedCandidate, len(candidates))
 	for i, c := range candidates {
-		exists, _, err := valuesPathExists(chartRoot, c.ValuesPath)
+		exists, _, err := ValuesPathExists(chartRoot, c.ValuesPath)
 		if err != nil {
 			// On error, assume exists (conservative)
 			c.ExistsInValues = true
@@ -816,4 +584,15 @@ func checkCandidatesInValues(chartRoot string, candidates []DetectedCandidate) [
 		result[i] = c
 	}
 	return result
+}
+
+// convertCRDFieldInfo converts crd.FieldInfo to k8s.FieldInfo
+func convertCRDFieldInfo(crdFI *crd.FieldInfo) *FieldInfo {
+	if crdFI == nil {
+		return nil
+	}
+	return &FieldInfo{
+		Path:     crdFI.Path,
+		MergeKey: crdFI.MergeKey,
+	}
 }

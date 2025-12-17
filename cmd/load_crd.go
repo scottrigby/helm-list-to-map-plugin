@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/crd"
 )
 
 func runLoadCRD() {
@@ -107,7 +109,7 @@ func loadCommonCRDs() {
 		sourcesFile = "common-crds.yaml"
 	}
 
-	sources, err := LoadCRDSources(sourcesFile)
+	sources, err := crd.LoadCRDSources(sourcesFile)
 	if err != nil {
 		fatal(fmt.Errorf("loading common-crds.yaml: %w", err))
 	}
@@ -158,7 +160,7 @@ func loadCommonCRDs() {
 		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
 	}
 
-	types := globalCRDRegistry.ListTypes()
+	types := crd.GetGlobalRegistry().ListTypes()
 	if len(types) > 0 {
 		fmt.Printf("\nTotal CRD types available: %d\n", len(types))
 	}
@@ -204,7 +206,7 @@ func loadAndStoreCRDFromURL(url, crdsDir string) error {
 	}
 
 	// Extract canonical filename from CRD metadata (includes storage version)
-	filename, err := ExtractCanonicalFilename(data)
+	filename, err := crd.ExtractCanonicalFilename(data)
 	if err != nil {
 		// Fallback to URL-based filename
 		parts := strings.Split(url, "/")
@@ -217,7 +219,7 @@ func loadAndStoreCRDFromURL(url, crdsDir string) error {
 	destPath := filepath.Join(crdsDir, filename)
 
 	// Check if file exists (skip unless --force)
-	if exists, reason := CRDFileExists(destPath); exists && !forceOverwrite {
+	if exists, reason := crd.CRDFileExists(destPath); exists && !forceOverwrite {
 		fmt.Printf("Skipped: %s -> %s (%s)\n", url, destPath, reason)
 		return nil
 	}
@@ -240,7 +242,7 @@ func loadAndStoreCRDFromFile(source, crdsDir string) error {
 
 	// Extract canonical filename from CRD metadata (includes storage version)
 	// This also validates that the file contains a valid CRD
-	filename, err := ExtractCanonicalFilename(data)
+	filename, err := crd.ExtractCanonicalFilename(data)
 	if err != nil {
 		return fmt.Errorf("not a valid CRD: %w", err)
 	}
@@ -248,7 +250,7 @@ func loadAndStoreCRDFromFile(source, crdsDir string) error {
 	destPath := filepath.Join(crdsDir, filename)
 
 	// Check if file exists (skip unless --force)
-	if exists, reason := CRDFileExists(destPath); exists && !forceOverwrite {
+	if exists, reason := crd.CRDFileExists(destPath); exists && !forceOverwrite {
 		fmt.Printf("Skipped: %s -> %s (%s)\n", source, destPath, reason)
 		return nil
 	}
@@ -311,5 +313,5 @@ func loadCRDsFromConfig() error {
 		return nil
 	}
 
-	return globalCRDRegistry.LoadFromDirectory(crdsDir)
+	return crd.GetGlobalRegistry().LoadFromDirectory(crdsDir)
 }

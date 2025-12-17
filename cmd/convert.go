@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/k8s"
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/template"
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/transform"
 )
@@ -79,7 +80,7 @@ Examples:
 	}
 
 	// Use new programmatic detection via K8s API introspection
-	candidates, err := detectConversionCandidates(root)
+	candidates, err := k8s.DetectConversionCandidates(root)
 	if err != nil {
 		fatal(err)
 	}
@@ -89,9 +90,9 @@ Examples:
 	candidates = append(candidates, userDetected...)
 
 	// Build PathInfo list and check which paths have matching template patterns
-	var pathInfos []PathInfo
+	var pathInfos []template.PathInfo
 	for _, c := range candidates {
-		pathInfos = append(pathInfos, PathInfo{
+		pathInfos = append(pathInfos, template.PathInfo{
 			DotPath:     c.ValuesPath,
 			MergeKey:    c.MergeKey,
 			SectionName: c.SectionName,
@@ -103,7 +104,7 @@ Examples:
 	matchedPaths := template.CheckTemplatePatterns(root, pathInfos)
 
 	// Filter candidates to only include paths with matching template patterns
-	candidateMap := make(map[string]DetectedCandidate)
+	candidateMap := make(map[string]k8s.DetectedCandidate)
 	var skippedPaths []string
 	for _, c := range candidates {
 		if matchedPaths[c.ValuesPath] {
@@ -114,14 +115,14 @@ Examples:
 	}
 
 	// Check values.yaml existence for candidates with matching templates
-	var candidateList []DetectedCandidate
+	var candidateList []k8s.DetectedCandidate
 	for _, c := range candidateMap {
 		candidateList = append(candidateList, c)
 	}
-	candidateList = checkCandidatesInValues(root, candidateList)
+	candidateList = k8s.CheckCandidatesInValues(root, candidateList)
 
 	// Separate by values existence
-	var withValuesCandidates, templateOnlyCandidates []DetectedCandidate
+	var withValuesCandidates, templateOnlyCandidates []k8s.DetectedCandidate
 	for _, c := range candidateList {
 		if c.ExistsInValues {
 			withValuesCandidates = append(withValuesCandidates, c)
@@ -131,7 +132,7 @@ Examples:
 	}
 
 	// Rebuild candidateMap with only candidates that have values
-	candidateMap = make(map[string]DetectedCandidate)
+	candidateMap = make(map[string]k8s.DetectedCandidate)
 	for _, c := range withValuesCandidates {
 		candidateMap[c.ValuesPath] = c
 	}
@@ -153,7 +154,7 @@ Examples:
 	}
 
 	// Use line-based editing to preserve original formatting
-	var edits []ArrayEdit
+	var edits []transform.ArrayEdit
 	transform.FindArrayEdits(doc, nil, candidateMap, &edits)
 
 	// Track all backup files created
@@ -216,7 +217,7 @@ Examples:
 				fmt.Printf("    Items:    %d\n", itemCount)
 			}
 
-			transformedPaths = append(transformedPaths, PathInfo{
+			transformedPaths = append(transformedPaths, template.PathInfo{
 				DotPath:     edit.Candidate.ValuesPath,
 				MergeKey:    edit.Candidate.MergeKey,
 				SectionName: edit.Candidate.SectionName,
@@ -239,7 +240,7 @@ Examples:
 		fmt.Println("\nTemplate-only conversions (no values.yaml entry):")
 		for _, c := range templateOnlyCandidates {
 			fmt.Printf("  %s (key=%s)\n", c.ValuesPath, c.MergeKey)
-			transformedPaths = append(transformedPaths, PathInfo{
+			transformedPaths = append(transformedPaths, template.PathInfo{
 				DotPath:     c.ValuesPath,
 				MergeKey:    c.MergeKey,
 				SectionName: c.SectionName,
@@ -307,7 +308,7 @@ func convertSubchartAndTrack(subchartPath string) (*SubchartConversion, error) {
 	}
 
 	// Use programmatic detection via K8s API introspection
-	candidates, err := detectConversionCandidates(subchartPath)
+	candidates, err := k8s.DetectConversionCandidates(subchartPath)
 	if err != nil {
 		return nil, fmt.Errorf("detecting candidates: %w", err)
 	}
@@ -317,9 +318,9 @@ func convertSubchartAndTrack(subchartPath string) (*SubchartConversion, error) {
 	candidates = append(candidates, userDetected...)
 
 	// Build PathInfo list and check which paths have matching template patterns
-	var pathInfos []PathInfo
+	var pathInfos []template.PathInfo
 	for _, c := range candidates {
-		pathInfos = append(pathInfos, PathInfo{
+		pathInfos = append(pathInfos, template.PathInfo{
 			DotPath:     c.ValuesPath,
 			MergeKey:    c.MergeKey,
 			SectionName: c.SectionName,
@@ -330,7 +331,7 @@ func convertSubchartAndTrack(subchartPath string) (*SubchartConversion, error) {
 	matchedPaths := template.CheckTemplatePatterns(subchartPath, pathInfos)
 
 	// Filter candidates to only include paths with matching template patterns
-	candidateMap := make(map[string]DetectedCandidate)
+	candidateMap := make(map[string]k8s.DetectedCandidate)
 	for _, c := range candidates {
 		if matchedPaths[c.ValuesPath] {
 			candidateMap[c.ValuesPath] = c
@@ -344,7 +345,7 @@ func convertSubchartAndTrack(subchartPath string) (*SubchartConversion, error) {
 	}
 
 	// Use line-based editing to preserve original formatting
-	var edits []ArrayEdit
+	var edits []transform.ArrayEdit
 	transform.FindArrayEdits(doc, nil, candidateMap, &edits)
 
 	if len(edits) > 0 {
@@ -363,7 +364,7 @@ func convertSubchartAndTrack(subchartPath string) (*SubchartConversion, error) {
 
 		// Track converted paths
 		for _, edit := range edits {
-			transformedPaths = append(transformedPaths, PathInfo{
+			transformedPaths = append(transformedPaths, template.PathInfo{
 				DotPath:     edit.Candidate.ValuesPath,
 				MergeKey:    edit.Candidate.MergeKey,
 				SectionName: edit.Candidate.SectionName,
@@ -406,7 +407,7 @@ func updateUmbrellaValues(umbrellaRoot string, conversions []SubchartConversion)
 
 	// Build a map of subchart prefixed paths to their conversion info
 	// e.g., "judge-api.deployment.env" -> PathInfo{MergeKey: "name", ...}
-	subchartPaths := make(map[string]PathInfo)
+	subchartPaths := make(map[string]template.PathInfo)
 	for _, conv := range conversions {
 		for _, p := range conv.ConvertedPaths {
 			// Prefix with subchart name
@@ -416,9 +417,9 @@ func updateUmbrellaValues(umbrellaRoot string, conversions []SubchartConversion)
 	}
 
 	// Find arrays in umbrella values that match subchart converted paths
-	candidateMap := make(map[string]DetectedCandidate)
+	candidateMap := make(map[string]k8s.DetectedCandidate)
 	for path, info := range subchartPaths {
-		candidateMap[path] = DetectedCandidate{
+		candidateMap[path] = k8s.DetectedCandidate{
 			ValuesPath:  path,
 			MergeKey:    info.MergeKey,
 			SectionName: info.SectionName,
@@ -426,7 +427,7 @@ func updateUmbrellaValues(umbrellaRoot string, conversions []SubchartConversion)
 	}
 
 	// Find array edits in umbrella values
-	var edits []ArrayEdit
+	var edits []transform.ArrayEdit
 	transform.FindArrayEdits(doc, nil, candidateMap, &edits)
 
 	if len(edits) == 0 {

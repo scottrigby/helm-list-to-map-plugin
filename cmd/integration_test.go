@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/k8s"
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/template"
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/transform"
 )
@@ -119,14 +120,14 @@ func TestConvertIdempotent(t *testing.T) {
 		t.Fatalf("loadValuesNode() error = %v", err)
 	}
 
-	candidates := map[string]DetectedCandidate{
+	candidates := map[string]k8s.DetectedCandidate{
 		"env": {
 			ValuesPath: "env",
 			MergeKey:   "name",
 		},
 	}
 
-	var edits []ArrayEdit
+	var edits []transform.ArrayEdit
 	transform.FindArrayEdits(doc, nil, candidates, &edits)
 
 	if len(edits) == 0 {
@@ -147,7 +148,7 @@ func TestConvertIdempotent(t *testing.T) {
 		t.Fatalf("loadValuesNode() on converted result error = %v", err)
 	}
 
-	var edits2 []ArrayEdit
+	var edits2 []transform.ArrayEdit
 	transform.FindArrayEdits(doc2, nil, candidates, &edits2)
 
 	// After conversion, there should be no more edits (already converted to map)
@@ -303,7 +304,7 @@ func TestFindArrayEdits(t *testing.T) {
 	}
 
 	// Set up candidates matching the basic chart
-	candidates := map[string]DetectedCandidate{
+	candidates := map[string]k8s.DetectedCandidate{
 		"env": {
 			ValuesPath: "env",
 			MergeKey:   "name",
@@ -318,7 +319,7 @@ func TestFindArrayEdits(t *testing.T) {
 		},
 	}
 
-	var edits []ArrayEdit
+	var edits []transform.ArrayEdit
 	transform.FindArrayEdits(doc, nil, candidates, &edits)
 
 	// Should find edits for env, volumes, volumeMounts
@@ -343,7 +344,7 @@ func TestApplyLineEdits(t *testing.T) {
 	tests := []struct {
 		name     string
 		original string
-		edits    []ArrayEdit
+		edits    []transform.ArrayEdit
 	}{
 		{
 			name:     "no edits returns original",
@@ -353,7 +354,7 @@ func TestApplyLineEdits(t *testing.T) {
 		{
 			name:     "empty edits returns original",
 			original: "key: value\n",
-			edits:    []ArrayEdit{},
+			edits:    []transform.ArrayEdit{},
 		},
 	}
 
@@ -374,7 +375,7 @@ func TestCheckTemplatePatterns(t *testing.T) {
 
 	chartDir := getTestdataPath(t, "charts/basic")
 
-	paths := []PathInfo{
+	paths := []template.PathInfo{
 		{DotPath: "env", MergeKey: "name"},
 		{DotPath: "volumes", MergeKey: "name"},
 		{DotPath: "volumeMounts", MergeKey: "mountPath"},

@@ -1,4 +1,4 @@
-package main
+package parser
 
 import (
 	"bufio"
@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+
 )
 
 // TemplateDirective represents a Go template directive found in a K8s manifest
@@ -40,7 +41,7 @@ type ConversionCandidate struct {
 }
 
 // parseTemplateFile parses a Helm template and extracts K8s resource info and directives
-func parseTemplateFile(templatePath string) (*ParsedTemplate, error) {
+func ParseTemplateFile(templatePath string) (*ParsedTemplate, error) {
 	content, err := os.ReadFile(templatePath)
 	if err != nil {
 		return nil, err
@@ -60,7 +61,8 @@ func parseTemplateFile(templatePath string) (*ParsedTemplate, error) {
 	}
 
 	// Resolve Go type (may be nil for CRDs)
-	result.GoType = resolveKubeAPIType(result.APIVersion, result.Kind)
+	// Note: GoType is not resolved here to avoid import cycle with pkg/k8s
+	// Caller should resolve using k8s.ResolveKubeAPIType if needed
 
 	// Extract template directives with their YAML paths
 	// This is needed for both built-in K8s types and CRDs
@@ -253,7 +255,7 @@ type ValuesUsage struct {
 
 // analyzeDirectiveContent extracts .Values usage from a template directive
 // withContext is provided when the directive is inside a "with .Values.X" block
-func analyzeDirectiveContent(content string, withContext string) []ValuesUsage {
+func AnalyzeDirectiveContent(content string, withContext string) []ValuesUsage {
 	var usages []ValuesUsage
 
 	// Pattern: toYaml .Values.X
@@ -323,7 +325,7 @@ func analyzeDirectiveContent(content string, withContext string) []ValuesUsage {
 }
 
 // hasIncludeDirective checks if content contains an include directive
-func hasIncludeDirective(content string) bool {
+func HasIncludeDirective(content string) bool {
 	return strings.Contains(content, "include ")
 }
 
@@ -402,11 +404,11 @@ func extractDefinedTemplate(fileContent, templateName string) string {
 
 // followIncludeChain recursively follows include directives to find .Values usage
 // withContext is passed through when the include is inside a "with .Values.X" block
-func followIncludeChain(templatesDir, content, withContext string, visited map[string]bool) []ValuesUsage {
+func FollowIncludeChain(templatesDir, content, withContext string, visited map[string]bool) []ValuesUsage {
 	var allUsages []ValuesUsage
 
 	// First check for direct .Values usage
-	usages := analyzeDirectiveContent(content, withContext)
+	usages := AnalyzeDirectiveContent(content, withContext)
 	allUsages = append(allUsages, usages...)
 
 	// Check for includes and follow them
@@ -427,7 +429,7 @@ func followIncludeChain(templatesDir, content, withContext string, visited map[s
 		}
 
 		// Recursively follow (pass through withContext)
-		nestedUsages := followIncludeChain(templatesDir, includedContent, withContext, visited)
+		nestedUsages := FollowIncludeChain(templatesDir, includedContent, withContext, visited)
 		allUsages = append(allUsages, nestedUsages...)
 	}
 

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/crd"
 )
 
 func runListCRDs() {
@@ -30,7 +32,7 @@ Flags:
 		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
 	}
 
-	types := globalCRDRegistry.ListTypes()
+	types := crd.GetGlobalRegistry().ListTypes()
 	if len(types) == 0 {
 		fmt.Println("No CRDs loaded.")
 		fmt.Println("Use 'helm list-to-map load-crd <file-or-url>' to load CRD definitions.")
@@ -41,7 +43,9 @@ Flags:
 		// Verbose: show each CRD with its fields
 		fmt.Printf("Loaded CRD types (%d):\n", len(types))
 		for _, t := range types {
-			fields := globalCRDRegistry.fields[t]
+			parts := strings.Split(t, "/")
+			apiVersion, kind := parts[0], parts[1]
+			fields := crd.GetGlobalRegistry().ListFields(apiVersion, kind)
 			fmt.Printf("\n%s (%d fields)\n", t, len(fields))
 			for _, f := range fields {
 				keys := strings.Join(f.MapKeys, ", ")
@@ -65,7 +69,9 @@ Flags:
 
 		// Print rows
 		for _, t := range types {
-			fields := globalCRDRegistry.fields[t]
+			parts := strings.Split(t, "/")
+			apiVersion, kind := parts[0], parts[1]
+			fields := crd.GetGlobalRegistry().ListFields(apiVersion, kind)
 			fmt.Printf("%-*s  %d\n", maxLen, t, len(fields))
 		}
 
