@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	pkgfs "github.com/scottrigby/helm-list-to-map-plugin/pkg/fs"
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/k8s"
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/template"
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/transform"
@@ -206,7 +207,7 @@ func runConvert(opts ConvertOptions) error {
 	var helperCreated bool
 	if !opts.DryRun {
 		var err error
-		tchanges, backupFiles, err = template.RewriteTemplatesWithBackups(root, transformedPaths, opts.BackupExt, backupFiles)
+		tchanges, backupFiles, err = template.RewriteTemplatesWithBackups(pkgfs.OSFileSystem{}, root, transformedPaths, opts.BackupExt, backupFiles)
 		if err != nil {
 			return err
 		}
@@ -218,7 +219,7 @@ func runConvert(opts ConvertOptions) error {
 			}
 		}
 
-		helperCreated = template.EnsureHelpersWithReport(root)
+		helperCreated = template.EnsureHelpersWithReport(pkgfs.OSFileSystem{}, root)
 		if helperCreated {
 			fmt.Println("\nCreated helper template:")
 			fmt.Printf("  templates/_listmap.tpl\n")
@@ -327,7 +328,7 @@ func convertSubchartAndTrack(subchartPath string, opts ConvertOptions) (*Subchar
 
 	// Rewrite templates
 	if !opts.DryRun && len(transformedPaths) > 0 {
-		tchanges, _, err := template.RewriteTemplatesWithBackups(subchartPath, transformedPaths, opts.BackupExt, nil)
+		tchanges, _, err := template.RewriteTemplatesWithBackups(pkgfs.OSFileSystem{}, subchartPath, transformedPaths, opts.BackupExt, nil)
 		if err != nil {
 			return nil, fmt.Errorf("rewriting templates: %w", err)
 		}
@@ -336,7 +337,7 @@ func convertSubchartAndTrack(subchartPath string, opts ConvertOptions) (*Subchar
 		}
 
 		// Create helper template
-		if template.EnsureHelpersWithReport(subchartPath) {
+		if template.EnsureHelpersWithReport(pkgfs.OSFileSystem{}, subchartPath) {
 			fmt.Printf("    Created: templates/_listmap.tpl\n")
 		}
 	}

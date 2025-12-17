@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/crd"
+	pkgfs "github.com/scottrigby/helm-list-to-map-plugin/pkg/fs"
 )
 
 func runLoadCRD(opts LoadCRDOptions) error {
@@ -171,7 +172,7 @@ func loadAndStoreCRDFromURL(url, crdsDir string, force bool) error {
 	destPath := filepath.Join(crdsDir, filename)
 
 	// Check if file exists (skip unless --force)
-	if exists, reason := crd.CRDFileExists(destPath); exists && !force {
+	if exists, reason := crd.CRDFileExists(pkgfs.OSFileSystem{}, destPath); exists && !force {
 		fmt.Printf("Skipped: %s -> %s (%s)\n", url, destPath, reason)
 		return nil
 	}
@@ -202,7 +203,7 @@ func loadAndStoreCRDFromFile(source, crdsDir string, force bool) error {
 	destPath := filepath.Join(crdsDir, filename)
 
 	// Check if file exists (skip unless --force)
-	if exists, reason := crd.CRDFileExists(destPath); exists && !force {
+	if exists, reason := crd.CRDFileExists(pkgfs.OSFileSystem{}, destPath); exists && !force {
 		fmt.Printf("Skipped: %s -> %s (%s)\n", source, destPath, reason)
 		return nil
 	}

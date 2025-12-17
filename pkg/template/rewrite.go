@@ -8,21 +8,23 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	filesystem "github.com/scottrigby/helm-list-to-map-plugin/pkg/fs"
 )
 
 // RewriteTemplatesWithBackups rewrites templates and tracks backup files
-func RewriteTemplatesWithBackups(chartPath string, paths []PathInfo, backupExtension string, existingBackups []string) ([]string, []string, error) {
+func RewriteTemplatesWithBackups(fsys filesystem.FileSystem, chartPath string, paths []PathInfo, backupExtension string, existingBackups []string) ([]string, []string, error) {
 	var changed []string
 	backups := existingBackups
 	tdir := filepath.Join(chartPath, "templates")
-	err := filepath.WalkDir(tdir, func(path string, d fs.DirEntry, err error) error {
+	err := fsys.WalkDir(tdir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
 		if !strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml") && !strings.HasSuffix(path, ".tpl") {
 			return nil
 		}
-		data, err := os.ReadFile(path)
+		data, err := fsys.ReadFile(path)
 		if err != nil {
 			return err
 		}
@@ -36,11 +38,11 @@ func RewriteTemplatesWithBackups(chartPath string, paths []PathInfo, backupExten
 
 		if newContent != orig {
 			backupPath := path + backupExtension
-			if err := backupFile(path, backupExtension, data); err != nil {
+			if err := backupFile(fsys, path, backupExtension, data); err != nil {
 				return err
 			}
 			backups = append(backups, backupPath)
-			if err := os.WriteFile(path, []byte(newContent), 0644); err != nil {
+			if err := fsys.WriteFile(path, []byte(newContent), 0644); err != nil {
 				return err
 			}
 			changed = append(changed, rel(chartPath, path))
@@ -203,6 +205,6 @@ func rel(root, p string) string {
 	return p
 }
 
-func backupFile(path, ext string, original []byte) error {
-	return os.WriteFile(path+ext, original, 0644)
+func backupFile(fsys filesystem.FileSystem, path, ext string, original []byte) error {
+	return fsys.WriteFile(path+ext, original, 0644)
 }

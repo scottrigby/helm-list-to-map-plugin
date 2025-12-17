@@ -388,6 +388,88 @@ helm list-to-map add-rule --path='istio.virtualService.http[]' --uniqueKey=name
 
 User rules are stored in `$HELM_CONFIG_HOME/list-to-map/config.yaml` and supplement the automatic detection.
 
+## Testability & Interfaces
+
+The codebase uses interfaces to abstract external dependencies (filesystem, CRD registry) to enable unit testing with mocks instead of touching real I/O.
+
+### FileSystem Interface
+
+Package functions that read or write files accept a `FileSystem` interface:
+
+```go
+// pkg/fs/fs.go
+type FileSystem interface {
+    ReadFile(path string) ([]byte, error)
+    WriteFile(path string, data []byte, perm os.FileMode) error
+    Stat(path string) (os.FileInfo, error)
+    WalkDir(root string, fn fs.WalkDirFunc) error
+}
+```
+
+**Production use** (real filesystem):
+
+```go
+template.RewriteTemplatesWithBackups(fs.OSFileSystem{}, chartPath, paths, backupExt, backups)
+```
+
+**Test use** (mock filesystem):
+
+```go
+mockFS := NewMockFileSystem()
+mockFS.files["/test/values.yaml"] = []byte("volumes: []")
+template.RewriteTemplatesWithBackups(mockFS, "/test", paths, ".bak", nil)
+// No real files created - fully isolated test
+```
+
+This enables testing file operations without:
+
+- Creating temporary directories
+- Cleaning up test artifacts
+- Potential race conditions from parallel tests
+- Dependency on filesystem state
+
+### Registry Interface
+
+The CRD registry implements a `Registry` interface to allow mocking CRD lookups:
+
+```go
+// pkg/crd/interface.go
+type Registry interface {
+    LoadFromFile(path string) error
+    LoadFromURL(url string) error
+    HasType(apiVersion, kind string) bool
+    GetFieldInfo(apiVersion, kind, yamlPath string) *CRDFieldInfo
+    // ...
+}
+```
+
+This allows tests to inject pre-populated CRD metadata without loading real CRD files or making HTTP requests.
+
+### Design Rationale
+
+**Why interfaces instead of direct calls?**
+
+The plugin previously called `os.ReadFile`, `os.WriteFile`, etc. directly throughout the codebase. This made unit tests difficult because:
+
+1. **Filesystem state**: Tests had to create real files, manage cleanup, and deal with potential conflicts
+2. **Slow tests**: Real I/O is orders of magnitude slower than in-memory operations
+3. **Hard to test error paths**: Difficult to simulate "file not found" or "permission denied" scenarios
+
+With interfaces:
+
+1. **Fast**: Tests run entirely in-memory
+2. **Isolated**: No shared state between tests
+3. **Comprehensive**: Easy to test error conditions by returning errors from mocks
+4. **Deterministic**: No flakiness from filesystem timing or permissions
+
+**Implementation strategy:**
+
+- `pkg/` functions accept interfaces (testable, reusable)
+- `cmd/` passes `OSFileSystem{}` (production use)
+- Tests use mock implementations (fast, isolated)
+
+This follows dependency injection principles while keeping the global registry available in `cmd/` for backward compatibility.
+
 ## File Overview
 
 - `cmd/analyzer.go`: K8s type registry, field schema navigation using reflection, and detection result types

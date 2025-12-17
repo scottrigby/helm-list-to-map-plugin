@@ -1,5 +1,9 @@
 package crd
 
+import (
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/fs"
+)
+
 // FieldInfo is a simple field info struct (avoids import cycle with pkg/k8s)
 type FieldInfo struct {
 	Path     string
@@ -15,14 +19,17 @@ type CRDRegistry struct {
 	// Map of "apiVersion/kind" to set of ALL array field paths (even without map keys)
 	// Used to filter non-array fields from "potentially convertible" list
 	arrayFields map[string]map[string]bool
+	// FileSystem for file operations (allows mocking in tests)
+	fs fs.FileSystem
 }
 
 // NewCRDRegistry creates a new empty CRD registry
-func NewCRDRegistry() *CRDRegistry {
+func NewCRDRegistry(filesystem fs.FileSystem) *CRDRegistry {
 	return &CRDRegistry{
 		fields:      make(map[string][]CRDFieldInfo),
 		versions:    make(map[string][]string),
 		arrayFields: make(map[string]map[string]bool),
+		fs:          filesystem,
 	}
 }
 
@@ -159,7 +166,7 @@ func (f *CRDFieldInfo) ToFieldInfo() *FieldInfo {
 }
 
 // Global CRD registry instance
-var globalCRDRegistry = NewCRDRegistry()
+var globalCRDRegistry = NewCRDRegistry(fs.OSFileSystem{})
 
 // GetGlobalRegistry returns the global CRD registry instance
 func GetGlobalRegistry() *CRDRegistry {
@@ -169,7 +176,7 @@ func GetGlobalRegistry() *CRDRegistry {
 // ResetGlobalRegistry resets the global CRD registry to a fresh empty state
 // This is primarily for testing purposes
 func ResetGlobalRegistry() {
-	globalCRDRegistry = NewCRDRegistry()
+	globalCRDRegistry = NewCRDRegistry(fs.OSFileSystem{})
 }
 
 // IsConvertibleCRDField checks if a field in a CRD is convertible (has map keys)

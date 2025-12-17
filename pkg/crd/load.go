@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/fs"
 	"gopkg.in/yaml.v3"
 )
 
@@ -74,15 +75,15 @@ func ExtractCanonicalFilename(data []byte) (string, error) {
 // CRDFileExists checks if a CRD file already exists at the given path
 // With storage version in filename, each unique storage version has its own file
 // Returns (exists, reason) where reason explains why to skip if file exists
-func CRDFileExists(path string) (bool, string) {
-	if _, err := os.Stat(path); err == nil {
+func CRDFileExists(filesystem fs.FileSystem, path string) (bool, string) {
+	if _, err := filesystem.Stat(path); err == nil {
 		return true, "file already exists (use --force to overwrite)"
 	}
 	return false, ""
 }
 
 func (r *CRDRegistry) LoadFromFile(path string) error {
-	data, err := os.ReadFile(path)
+	data, err := r.fs.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("reading CRD file: %w", err)
 	}
@@ -110,7 +111,7 @@ func (r *CRDRegistry) LoadFromURL(url string) error {
 
 // LoadFromDirectory scans a directory for CRD YAML files
 func (r *CRDRegistry) LoadFromDirectory(dir string) error {
-	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+	return r.fs.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
@@ -328,7 +329,7 @@ func LoadCRDs(sources []string) error {
 		if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
 			err = globalCRDRegistry.LoadFromURL(source)
 		} else {
-			info, statErr := os.Stat(source)
+			info, statErr := globalCRDRegistry.fs.Stat(source)
 			if statErr != nil {
 				return fmt.Errorf("accessing CRD source %s: %w", source, statErr)
 			}

@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/crd"
-
+	pkgfs "github.com/scottrigby/helm-list-to-map-plugin/pkg/fs"
 	"github.com/scottrigby/helm-list-to-map-plugin/pkg/transform"
 )
 
@@ -244,7 +244,7 @@ func TestCRDRegistryLoadFromFileErrors(t *testing.T) {
 	t.Parallel()
 
 	// Test loading from non-existent file
-	reg := crd.NewCRDRegistry()
+	reg := crd.NewCRDRegistry(pkgfs.OSFileSystem{})
 	err := reg.LoadFromFile("/nonexistent/path.yaml")
 	if err == nil {
 		t.Error("expected error for non-existent file")
@@ -262,7 +262,7 @@ func TestCRDRegistryLoadFromFileErrors(t *testing.T) {
 func TestCRDRegistryLoadFromDirectoryErrors(t *testing.T) {
 	t.Parallel()
 
-	reg := crd.NewCRDRegistry()
+	reg := crd.NewCRDRegistry(pkgfs.OSFileSystem{})
 
 	// Test loading from non-existent directory
 	err := reg.LoadFromDirectory("/nonexistent/directory")

@@ -1,18 +1,19 @@
 package template
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/fs"
 )
 
 // EnsureHelpersWithReport creates helper template and returns true if created
-func EnsureHelpersWithReport(root string) bool {
+func EnsureHelpersWithReport(filesystem fs.FileSystem, root string) bool {
 	path := filepath.Join(root, "templates", "_listmap.tpl")
-	if _, err := os.Stat(path); err == nil {
+	if _, err := filesystem.Stat(path); err == nil {
 		return false // Already exists
 	}
-	err := os.WriteFile(path, []byte(strings.TrimSpace(ListMapHelper())+"\n"), 0644)
+	err := filesystem.WriteFile(path, []byte(strings.TrimSpace(ListMapHelper())+"\n"), 0644)
 	return err == nil
 }
 

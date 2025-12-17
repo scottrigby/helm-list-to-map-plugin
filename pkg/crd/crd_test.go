@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/scottrigby/helm-list-to-map-plugin/pkg/fs"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -32,7 +33,7 @@ func getCRDFixturePath(t *testing.T, name string) string {
 func TestNewCRDRegistry(t *testing.T) {
 	t.Parallel()
 
-	reg := NewCRDRegistry()
+	reg := NewCRDRegistry(fs.OSFileSystem{})
 
 	if reg == nil {
 		t.Fatal("NewCRDRegistry returned nil")
@@ -95,7 +96,7 @@ func TestCRDRegistry_LoadFromFile(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fixturePath := getCRDFixturePath(t, tt.fixture)
 
-			reg := NewCRDRegistry()
+			reg := NewCRDRegistry(fs.OSFileSystem{})
 			err := reg.LoadFromFile(fixturePath)
 
 			if tt.wantErr {
@@ -126,7 +127,7 @@ func TestCRDRegistry_LoadFromFileInvalid(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reg := NewCRDRegistry()
+	reg := NewCRDRegistry(fs.OSFileSystem{})
 	err := reg.LoadFromFile(tmpFile)
 	if err == nil {
 		t.Error("expected error for invalid YAML")
@@ -140,7 +141,7 @@ func TestCRDRegistry_LoadFromDirectory(t *testing.T) {
 	// Use the testdata/crds directory which has multiple CRD files
 	crdsDir := getTestdataPath(t, "crds")
 
-	reg := NewCRDRegistry()
+	reg := NewCRDRegistry(fs.OSFileSystem{})
 	err := reg.LoadFromDirectory(crdsDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -159,7 +160,7 @@ func TestCRDRegistry_GetFieldInfo(t *testing.T) {
 
 	fixturePath := getCRDFixturePath(t, "multi-field.yaml")
 
-	reg := NewCRDRegistry()
+	reg := NewCRDRegistry(fs.OSFileSystem{})
 	if err := reg.LoadFromFile(fixturePath); err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +228,7 @@ func TestCRDRegistry_HasType(t *testing.T) {
 
 	fixturePath := getCRDFixturePath(t, "list-map-keys.yaml")
 
-	reg := NewCRDRegistry()
+	reg := NewCRDRegistry(fs.OSFileSystem{})
 	if err := reg.LoadFromFile(fixturePath); err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +250,7 @@ func TestCRDRegistry_HasGroupKind(t *testing.T) {
 
 	fixturePath := getCRDFixturePath(t, "multi-version.yaml")
 
-	reg := NewCRDRegistry()
+	reg := NewCRDRegistry(fs.OSFileSystem{})
 	if err := reg.LoadFromFile(fixturePath); err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +272,7 @@ func TestCRDRegistry_GetAvailableVersions(t *testing.T) {
 
 	fixturePath := getCRDFixturePath(t, "multi-version.yaml")
 
-	reg := NewCRDRegistry()
+	reg := NewCRDRegistry(fs.OSFileSystem{})
 	if err := reg.LoadFromFile(fixturePath); err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +305,7 @@ func TestCRDRegistry_CheckVersionMismatch(t *testing.T) {
 
 	fixturePath := getCRDFixturePath(t, "multi-version.yaml")
 
-	reg := NewCRDRegistry()
+	reg := NewCRDRegistry(fs.OSFileSystem{})
 	if err := reg.LoadFromFile(fixturePath); err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +374,7 @@ func TestCRDRegistry_IsArrayField(t *testing.T) {
 
 	fixturePath := getCRDFixturePath(t, "array-field.yaml")
 
-	reg := NewCRDRegistry()
+	reg := NewCRDRegistry(fs.OSFileSystem{})
 	if err := reg.LoadFromFile(fixturePath); err != nil {
 		t.Fatal(err)
 	}
@@ -504,7 +505,7 @@ func TestCRDFileExists(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	exists, reason := CRDFileExists(existingFile)
+	exists, reason := CRDFileExists(fs.OSFileSystem{}, existingFile)
 	if !exists {
 		t.Error("should report existing file")
 	}
@@ -512,7 +513,7 @@ func TestCRDFileExists(t *testing.T) {
 		t.Error("should provide reason for existing file")
 	}
 
-	exists, reason = CRDFileExists(filepath.Join(tmpDir, "nonexistent.yaml"))
+	exists, reason = CRDFileExists(fs.OSFileSystem{}, filepath.Join(tmpDir, "nonexistent.yaml"))
 	if exists {
 		t.Error("should report non-existing file as not existing")
 	}
@@ -598,7 +599,7 @@ func TestDetectEmbeddedK8sType(t *testing.T) {
 
 	fixturePath := getCRDFixturePath(t, "embedded-container.yaml")
 
-	reg := NewCRDRegistry()
+	reg := NewCRDRegistry(fs.OSFileSystem{})
 	if err := reg.LoadFromFile(fixturePath); err != nil {
 		t.Fatal(err)
 	}
