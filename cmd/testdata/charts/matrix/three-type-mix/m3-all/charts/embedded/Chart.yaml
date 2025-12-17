@@ -1,0 +1,4 @@
+apiVersion: v2
+name: embedded
+description: Embedded chart in charts/ directory
+version: 0.1.0

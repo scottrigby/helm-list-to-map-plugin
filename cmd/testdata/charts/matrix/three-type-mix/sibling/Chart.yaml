@@ -1,0 +1,4 @@
+apiVersion: v2
+name: sibling
+description: Sibling chart referenced via file://
+version: 0.1.0

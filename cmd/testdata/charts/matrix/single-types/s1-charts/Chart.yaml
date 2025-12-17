@@ -1,0 +1,4 @@
+apiVersion: v2
+name: s1-charts
+description: Test fixture - Single embedded chart in charts/
+version: 0.1.0

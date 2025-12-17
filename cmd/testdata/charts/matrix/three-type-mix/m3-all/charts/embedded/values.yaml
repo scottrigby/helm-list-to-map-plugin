@@ -1,0 +1,3 @@
+volumes:
+  - name: embedded-data
+    emptyDir: {}

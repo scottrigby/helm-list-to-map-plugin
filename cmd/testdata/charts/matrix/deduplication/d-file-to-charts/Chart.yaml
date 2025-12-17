@@ -1,0 +1,9 @@
+apiVersion: v2
+name: d-file-to-charts
+description: Test fixture - Deduplication (file:// points to charts/)
+version: 0.1.0
+
+dependencies:
+  - name: shared
+    version: "0.1.0"
+    repository: "file://./charts/shared"

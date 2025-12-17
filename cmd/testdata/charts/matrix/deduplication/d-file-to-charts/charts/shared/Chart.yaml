@@ -1,0 +1,4 @@
+apiVersion: v2
+name: shared
+description: Shared chart accessible both via file:// and charts/
+version: 0.1.0

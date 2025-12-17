@@ -39,6 +39,24 @@ test:
 	@echo "Running tests..."
 	@go test -v ./cmd/... ./pkg/...
 
+# Run only unit tests (pkg/)
+.PHONY: test-unit
+test-unit:
+	@echo "Running unit tests..."
+	@go test -v ./pkg/...
+
+# Run only integration/E2E tests (cmd/)
+.PHONY: test-integration
+test-integration:
+	@echo "Running integration/E2E tests..."
+	@go test -v ./cmd/...
+
+# Run only E2E tests (tests that exec the binary)
+.PHONY: test-e2e
+test-e2e:
+	@echo "Running E2E tests (binary execution)..."
+	@go test -v ./cmd/... -run 'TestCLI|TestSubchart'
+
 # Run tests with coverage
 .PHONY: test-cover
 test-cover:
@@ -65,3 +83,20 @@ fmt:
 	@echo "Formatting code..."
 	@goimports -w cmd/ pkg/
 	@go fmt ./cmd/... ./pkg/...
+
+# Help
+.PHONY: help
+help:
+	@echo "Available targets:"
+	@echo "  make build              - Build the binary"
+	@echo "  make clean              - Remove build artifacts"
+	@echo "  make deps               - Download and verify dependencies"
+	@echo "  make test               - Run all tests (unit + integration)"
+	@echo "  make test-unit          - Run unit tests only (pkg/...)"
+	@echo "  make test-integration   - Run integration/E2E tests (cmd/...)"
+	@echo "  make test-e2e           - Run only E2E tests (binary execution)"
+	@echo "  make test-cover         - Run tests with coverage report"
+	@echo "  make test-short         - Run only fast tests (skip slow E2E)"
+	@echo "  make lint               - Run golangci-lint"
+	@echo "  make fmt                - Format code with goimports"
+	@echo "  make help               - Show this help message"

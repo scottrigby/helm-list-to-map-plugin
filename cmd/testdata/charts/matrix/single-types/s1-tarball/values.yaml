@@ -1,0 +1,5 @@
+replicas: 1
+
+env:
+  - name: PARENT_VAR
+    value: "parent-value"

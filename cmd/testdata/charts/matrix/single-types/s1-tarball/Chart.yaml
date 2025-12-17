@@ -1,0 +1,4 @@
+apiVersion: v2
+name: s1-tarball
+description: Test fixture - Single tarball in charts/
+version: 0.1.0

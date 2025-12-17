@@ -475,10 +475,196 @@ With interfaces:
 **Implementation strategy:**
 
 - `pkg/` functions accept interfaces (testable, reusable)
-- `cmd/` passes `OSFileSystem{}` (production use)
-- Tests use mock implementations (fast, isolated)
+- `cmd/` code passes `OSFileSystem{}` to `pkg/` (production use)
+- `pkg/` unit tests use mock implementations (fast, isolated)
+- `cmd/` integration tests use real filesystem (test actual behavior)
 
-This follows dependency injection principles while keeping the global registry available in `cmd/` for backward compatibility.
+This follows dependency injection principles while keeping the global registry available in `cmd/` for backward compatibility. See [Testing Strategy](#testing-strategy) for details on when to use mocks vs real dependencies.
+
+## Testing Strategy
+
+The codebase uses different testing approaches depending on what's being tested. Understanding when to use mocks vs real dependencies is crucial for maintainability.
+
+### Test Types
+
+**Unit Tests** (`pkg/*_test.go`)
+
+- Test individual functions/packages in isolation
+- Use mock implementations (MockFileSystem, MockRegistry)
+- Fast execution (in-memory, no I/O)
+- Focus on logic correctness
+
+Example:
+
+```go
+// pkg/template/rewrite_test.go
+func TestRewriteTemplates(t *testing.T) {
+    mockFS := fs.NewMockFileSystem()
+    mockFS.files["/chart/templates/deployment.yaml"] = []byte("env:\n{{- toYaml .Values.env }}")
+
+    err := template.RewriteTemplates(mockFS, "/chart", paths, ".bak")
+    // Verify in-memory state changed, no disk I/O
+}
+```
+
+**Integration Tests** (`cmd/*_test.go` - calling internal functions)
+
+- Test multiple components working together
+- Use real filesystem via standard `os.*` calls
+- Use `t.TempDir()` for isolation
+- Call internal functions directly (e.g., `detectConversionCandidatesFull`)
+
+Example:
+
+```go
+// cmd/integration_test.go, cmd/dependency_test.go
+func TestDetectCommand(t *testing.T) {
+    setupTestEnv(t)  // Sets HELM_CONFIG_HOME
+    chartPath := copyChart(t, "testdata/charts/basic")  // Real files
+
+    result, err := detectConversionCandidatesFull(chartPath)  // Internal function
+
+    // Verify detection logic with real chart files
+}
+```
+
+**End-to-End Tests** (`cmd/*_test.go` - executing binary)
+
+- Test complete user workflows via CLI
+- Build binary with `go build`, execute with `exec.Command`
+- Use real filesystem, real Helm charts
+- Verify both command output and file modifications
+
+Example:
+
+```go
+// cmd/cli_test.go, cmd/subchart_integration_test.go
+func TestCLIConvertActual(t *testing.T) {
+    binPath := buildTestBinary(t)  // Builds actual binary
+    chartPath := copyChart(t, "testdata/charts/basic")
+
+    cmd := exec.Command(binPath, "convert", "--chart", chartPath)  // Exec binary
+    output, err := cmd.CombinedOutput()
+
+    // Verify both CLI output and file changes
+    convertedValues, _ := os.ReadFile(filepath.Join(chartPath, "values.yaml"))
+    // Check values.yaml was actually converted
+}
+```
+
+**Note:** Both integration and E2E tests live in `cmd/*_test.go` files. The distinction is:
+
+- **Integration tests** call internal functions (faster, easier to debug)
+- **E2E tests** execute the compiled binary (slower, tests actual user experience)
+
+### When to Use MockFileSystem
+
+**Use mocks in unit tests of `pkg/` functions:**
+
+```go
+// Testing pkg/template functions
+func TestEnsureHelpers(t *testing.T) {
+    mockFS := fs.NewMockFileSystem()
+
+    created := template.EnsureHelpersWithReport(mockFS, "/chart")
+
+    // Fast: no real files created
+    // Isolated: parallel tests don't conflict
+    // Comprehensive: easy to test error conditions
+}
+```
+
+**Use real filesystem in `cmd/` integration/e2e tests:**
+
+```go
+// Testing CLI behavior
+func TestConvertCommand(t *testing.T) {
+    chartPath := copyChart(t, "testdata/charts/basic")
+
+    // Use real os.ReadFile, os.WriteFile, etc.
+    // Tests actual end-to-end behavior users will experience
+}
+```
+
+### Production Code Organization
+
+**Production code** = All non-test code shipped to users:
+
+- `cmd/*.go` - CLI layer (commands, entry points, CLI-specific logic)
+- `pkg/*/*.go` - Domain logic (reusable library code, algorithms)
+
+Both are production code! The distinction is architectural:
+
+- `pkg/` functions accept `FileSystem` interface (testable with mocks)
+- `cmd/` code passes `fs.OSFileSystem{}` to `pkg/` functions (real filesystem)
+- `cmd/` integration tests use `os.*` directly (test real behavior)
+
+### Test File Organization
+
+```
+cmd/
+├── detect.go                  # Production: CLI command
+├── detect_test.go             # Integration: tests detect command
+├── cli_test.go                # E2E: tests CLI via exec.Command
+├── subchart_integration_test.go  # E2E: tests subchart workflows
+└── testdata/                  # Fixtures for integration tests
+    └── charts/
+
+pkg/template/
+├── rewrite.go                 # Production: template rewriting logic
+├── rewrite_test.go            # Unit: tests with MockFileSystem
+└── helper.go                  # Production: helper generation
+```
+
+### Design Rationale
+
+**Why different approaches?**
+
+Unit tests with mocks:
+
+- ✅ Fast (in-memory)
+- ✅ Isolated (no shared state)
+- ✅ Easy to test error paths
+- ✅ Parallel execution safe
+- ❌ Don't test real filesystem behavior
+
+Integration/E2E tests with real filesystem:
+
+- ✅ Test actual user experience
+- ✅ Catch real-world issues
+- ✅ Verify CLI output and file changes
+- ❌ Slower
+- ❌ Require cleanup (t.TempDir() handles this)
+
+Both are necessary:
+
+- Unit tests ensure individual functions work correctly
+- Integration tests ensure components work together
+- E2E tests ensure the tool works as users expect
+
+### Running Tests
+
+```bash
+# All tests (explicit paths to avoid nested projects)
+go test -v ./cmd/... ./pkg/...
+
+# Only unit tests (fast, for development)
+go test -v ./pkg/...
+
+# Only integration/E2E tests
+go test -v ./cmd/...
+
+# Only E2E tests (binary execution)
+go test -v ./cmd/... -run 'TestCLI|TestSubchart'
+
+# Skip slow tests during development
+go test -v -short ./cmd/... ./pkg/...
+
+# Using Makefile targets (see Makefile for available targets)
+make test              # All tests
+make test-unit         # Unit tests only
+make test-integration  # Integration/E2E tests only
+```
 
 ## File Overview
 

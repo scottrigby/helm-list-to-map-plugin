@@ -1,0 +1,10 @@
+replicas: 1
+
+env:
+  - name: EMBEDDED_VAR
+    value: "embedded-value"
+
+volumes:
+  - name: config
+    configMap:
+      name: embedded-config

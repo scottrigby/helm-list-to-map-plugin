@@ -50,6 +50,44 @@ func copyChart(t *testing.T, srcChart string) string {
 	return dst
 }
 
+// copyChartWithSiblings copies a test chart and its sibling directories (for file:// dependencies)
+// It copies the parent directory of srcChart, returning the path to the chart within the copy
+func copyChartWithSiblings(t *testing.T, srcChart string) string {
+	t.Helper()
+
+	// Get the parent directory and the chart name
+	parentDir := filepath.Dir(srcChart)
+	chartName := filepath.Base(srcChart)
+
+	// Create temp directory
+	dst := t.TempDir()
+
+	// Copy the entire parent directory structure
+	err := filepath.Walk(parentDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		relPath, _ := filepath.Rel(parentDir, path)
+		dstPath := filepath.Join(dst, relPath)
+
+		if info.IsDir() {
+			return os.MkdirAll(dstPath, info.Mode())
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(dstPath, data, info.Mode())
+	})
+	if err != nil {
+		t.Fatalf("failed to copy chart with siblings: %v", err)
+	}
+
+	// Return the path to the main chart within the copied structure
+	return filepath.Join(dst, chartName)
+}
+
 // resetGlobalState resets global state between tests
 func resetGlobalState(t *testing.T) {
 	t.Helper()

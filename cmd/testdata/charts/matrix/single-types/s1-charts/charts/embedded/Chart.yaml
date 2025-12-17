@@ -1,0 +1,4 @@
+apiVersion: v2
+name: embedded
+description: Embedded subchart for S1-C test
+version: 0.1.0

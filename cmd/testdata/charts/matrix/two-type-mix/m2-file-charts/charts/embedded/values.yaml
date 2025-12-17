@@ -1,0 +1,3 @@
+env:
+  - name: EMBEDDED_VAR
+    value: "embedded-value"

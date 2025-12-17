@@ -1,0 +1,9 @@
+apiVersion: v2
+name: m3-all
+description: Test fixture - All three types (file://, charts/, tarball)
+version: 0.1.0
+
+dependencies:
+  - name: sibling
+    version: "0.1.0"
+    repository: "file://../sibling"

@@ -1,0 +1,12 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-sibling
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          image: nginx:latest
+          ports:
+            {{- toYaml .Values.ports | nindent 12 }}
