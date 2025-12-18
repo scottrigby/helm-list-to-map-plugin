@@ -385,3 +385,55 @@ This namespacing pattern:
 2. Fall back to old location for backwards compatibility
 3. On first write, migrate to new location with deprecation notice
 4. Remove old location support in next major version
+
+## Release & Configuration Infrastructure
+
+### Automated tag creation with version validation
+
+**Status:** Not started
+
+Ensure git tags can only be created when plugin.yaml version matches the tag version.
+
+**Problem:** Manual tag creation can result in version mismatches between git tags and plugin.yaml, causing user confusion when installing via `helm plugin install --version`.
+
+**Solution:** GitHub Ruleset + GitHub Actions workflow
+
+**Implementation:**
+
+1. **GitHub Ruleset** - Block all users from creating/deleting tags matching `v*`
+
+   ```
+   Name: Protect version tags
+   Target: Tags matching v*
+   Rules: Restrict creations, deletions, updates
+   Bypass actors: github-actions[bot]
+   ```
+
+2. **GitHub Action** (`.github/workflows/release.yml`) - Manual workflow that:
+   - Takes version input via `workflow_dispatch`
+   - Extracts version from plugin.yaml
+   - Validates tag matches plugin.yaml version
+   - Creates annotated tag
+   - Creates draft release with auto-generated notes
+   - Fails with clear error if versions don't match
+
+3. **Authentication** - Options in order of preference:
+   - Default `GITHUB_TOKEN` with `contents: write` permission
+   - Fine-grained PAT (if GITHUB_TOKEN can't bypass ruleset)
+   - GitHub App installation token (best for teams)
+
+**Workflow inputs:**
+
+- `version` (required): Tag name, e.g., `v1.0.0-alpha.3`
+- `prerelease` (optional): Mark as pre-release (default: false)
+
+**Validation logic:**
+
+```bash
+# Strip 'v' prefix from tag, compare to plugin.yaml version
+TAG_VERSION="${INPUT_TAG#v}"
+if [ "$TAG_VERSION" != "$PLUGIN_VERSION" ]; then
+  echo "::error::Version mismatch!"
+  exit 1
+fi
+```
