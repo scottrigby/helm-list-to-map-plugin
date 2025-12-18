@@ -338,3 +338,50 @@ helm list-to-map generate-upstream-pr --chart ./umbrella/charts/mysql
 ```
 
 This is likely out of scope for this plugin but could be a separate tool.
+
+---
+
+## Plugin Configuration Location
+
+### Move config to namespaced location
+
+**Status:** Not started
+
+**Current:** Plugin config is stored at `$HELM_CONFIG_HOME/list-to-map/config.yaml`
+
+**Proposed:** Move to `$HELM_CONFIG_HOME/plugins/list-to-map/config.yaml`
+
+**Rationale:**
+
+Currently Helm handles config locations inconsistently:
+
+- Registry config: `$HELM_CONFIG_HOME/registry/config.json`
+- Repository config: `$HELM_CONFIG_HOME/repositories.yaml` (at root)
+- Plugin configs: `$HELM_CONFIG_HOME/<plugin-name>/` (at root)
+
+This creates potential naming conflicts. For example, a plugin named "registry" would conflict with `$HELM_CONFIG_HOME/registry/`.
+
+**Recommended Helm-wide approach:**
+
+Namespace all Helm config by package type:
+
+- `$HELM_CONFIG_HOME/registry/` - Registry config
+- `$HELM_CONFIG_HOME/plugins/<plugin-name>/` - Per-plugin config
+- `$HELM_CONFIG_HOME/repositories/` - Repository config (move from root)
+- `$HELM_CONFIG_HOME/provenance/` - Signature/provenance config
+- `$HELM_CONFIG_HOME/chart/v2/`, `chart/v3/` - Chart version-specific config
+
+This namespacing pattern:
+
+1. Prevents name conflicts between plugin names and Helm internal directories
+2. Enables future user-configurable plugin settings in upstream Helm
+3. Follows standard config organization patterns
+
+**Upstream consideration:** This may warrant a HIP (Helm Improvement Proposal) to standardize config namespacing across all Helm packages.
+
+**Migration path for this plugin:**
+
+1. Check for config at new location first
+2. Fall back to old location for backwards compatibility
+3. On first write, migrate to new location with deprecation notice
+4. Remove old location support in next major version
