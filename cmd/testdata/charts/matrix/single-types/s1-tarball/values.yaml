@@ -1,5 +1,6 @@
-replicas: 1
+appName: tarball-parent
 
-env:
-  - name: PARENT_VAR
-    value: "parent-value"
+remote-chart:
+  env:
+    - name: REMOTE_OVERRIDE
+      value: "from-parent"

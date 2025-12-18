@@ -1,0 +1,11 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sibling-m3
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          env:
+            {{- toYaml .Values.env | nindent 12 }}

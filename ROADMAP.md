@@ -52,14 +52,24 @@ When a CRD is loaded but a specific field path doesn't have `x-kubernetes-list-m
 
 ### Implement comprehensive test suite
 
-**Status:** In progress (foundation complete)
+**Status:** ✅ Completed
 
-See [TESTING_PLAN.md](TESTING_PLAN.md) for the full testing strategy:
+Comprehensive test suite implemented with 4-layer structure:
 
-- Unit tests for `pkg/k8s/`, `pkg/crd/`, `pkg/parser/`, `pkg/transform/`, `pkg/template/`
-- Integration tests for CLI commands with isolated `HELM_CONFIG_HOME`
-- Golden file tests for output regression testing
-- Test fixtures: basic, nested-values, subcharts, dependencies, CRDs, partials, edge cases
+- Unit tests (`pkg/`) - Fast, mocked dependencies
+- In-process CLI tests (`cmd/`) - Fast, no binary compilation
+- Integration tests (`integration/`) - Cross-package workflows
+- E2E tests (`e2e/`) - Minimal smoke tests
+
+See `CONTRIBUTING.md` and `ARCHITECTURE.md` for test organization details.
+
+Test coverage includes:
+
+- All CLI commands and flags
+- Subchart dependencies (11 scenarios covering all flag combinations)
+- Error handling and edge cases
+- Template rewriting patterns
+- CRD loading and introspection
 
 ### Add Makefile test targets
 
@@ -213,6 +223,17 @@ helm list-to-map convert --chart ./my-chart -f values-dev.yaml -f values-prod.ya
 - Report which file each detected candidate came from
 - Handle paths relative to CWD or chart directory
 - Consider: Should converted override files match the base chart's new map structure?
+
+**Test coverage needed:**
+
+When implementing this feature, add tests for:
+
+1. Basic override file detection - Detect arrays in both base and `-f` files
+2. Override file conversion - Convert arrays in override files, create backups
+3. Multiple override files - Process in order, handle same path in multiple files
+4. Path resolution - Relative/absolute paths, non-existent file errors
+5. Edge cases - Override has array not in base, conflicting types, empty files
+6. Dry-run mode - Verify no files modified in dry-run
 
 **Edge cases to consider:**
 

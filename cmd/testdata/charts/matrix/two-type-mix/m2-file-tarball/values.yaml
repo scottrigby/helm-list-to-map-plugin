@@ -1,0 +1,11 @@
+appName: m2-ft-parent
+
+sibling-for-ft:
+  env:
+    - name: FILE_VAR
+      value: "override"
+
+remote-ft:
+  env:
+    - name: TARBALL_VAR
+      value: "override"

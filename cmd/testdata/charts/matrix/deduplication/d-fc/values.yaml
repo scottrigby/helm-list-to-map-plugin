@@ -1,0 +1,6 @@
+appName: dedup-parent
+
+shared:
+  env:
+    - name: SHARED_VAR
+      value: "parent-override"

@@ -1,0 +1,5 @@
+level1-with-embedded:
+  nested-embedded:
+    env:
+      - name: NESTED_OVERRIDE
+        value: "from-parent"

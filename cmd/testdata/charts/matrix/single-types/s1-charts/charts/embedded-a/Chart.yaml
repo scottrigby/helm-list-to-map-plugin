@@ -1,0 +1,4 @@
+apiVersion: v2
+name: embedded-a
+description: Embedded subchart A
+version: 1.0.0

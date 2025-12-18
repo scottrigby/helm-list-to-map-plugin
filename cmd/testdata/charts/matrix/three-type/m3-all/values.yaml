@@ -1,0 +1,11 @@
+appName: m3-parent
+
+sibling-for-m3:
+  env:
+    - name: FILE_VAR
+      value: "override"
+
+embedded-d:
+  env:
+    - name: CHARTS_VAR
+      value: "override"

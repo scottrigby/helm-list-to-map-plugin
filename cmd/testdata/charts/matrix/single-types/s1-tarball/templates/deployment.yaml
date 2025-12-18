@@ -1,19 +1,10 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}
+  name: tarball-parent
 spec:
-  replicas: {{ .Values.replicas }}
-  selector:
-    matchLabels:
-      app: {{ .Release.Name }}
   template:
-    metadata:
-      labels:
-        app: {{ .Release.Name }}
     spec:
       containers:
-        - name: app
-          image: nginx:latest
-          env:
-{{- toYaml .Values.env | nindent 12 }}
+        - name: main
+          image: nginx

@@ -722,30 +722,6 @@ Both are necessary:
 - Integration tests ensure components work together
 - E2E tests ensure the tool works as users expect
 
-### Running Tests
-
-```bash
-# All tests (explicit paths to avoid nested projects)
-go test -v ./cmd/... ./pkg/...
-
-# Only unit tests (fast, for development)
-go test -v ./pkg/...
-
-# Only integration/E2E tests
-go test -v ./cmd/...
-
-# Only E2E tests (binary execution)
-go test -v ./cmd/... -run 'TestCLI|TestSubchart'
-
-# Skip slow tests during development
-go test -v -short ./cmd/... ./pkg/...
-
-# Using Makefile targets (see Makefile for available targets)
-make test              # All tests
-make test-unit         # Unit tests only
-make test-integration  # Integration/E2E tests only
-```
-
 ## File Overview
 
 **cmd/** - CLI layer:

@@ -1,9 +1,8 @@
 apiVersion: v2
 name: m2-file-charts
-description: Test fixture - Mix of file:// and charts/ directory
-version: 0.1.0
-
+description: Mix of file:// and charts/ dependencies
+version: 1.0.0
 dependencies:
-  - name: sibling
-    version: "0.1.0"
-    repository: "file://../sibling"
+  - name: sibling-for-m2
+    version: "1.0.0"
+    repository: file://../sibling-for-m2

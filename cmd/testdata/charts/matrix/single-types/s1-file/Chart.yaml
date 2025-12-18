@@ -1,0 +1,8 @@
+apiVersion: v2
+name: s1-file
+description: Test chart with single file:// dependency
+version: 1.0.0
+dependencies:
+  - name: sibling-chart
+    version: "1.0.0"
+    repository: file://../sibling-chart

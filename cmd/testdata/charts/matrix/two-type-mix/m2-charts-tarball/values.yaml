@@ -1,0 +1,11 @@
+appName: m2-ct-parent
+
+embedded-ct:
+  env:
+    - name: EMBEDDED_CT_VAR
+      value: "override"
+
+remote-ct:
+  env:
+    - name: TARBALL_CT_VAR
+      value: "override"

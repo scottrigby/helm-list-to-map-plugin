@@ -1,0 +1,8 @@
+apiVersion: v2
+name: m2-file-tarball
+description: Mix of file:// and tarball dependencies
+version: 1.0.0
+dependencies:
+  - name: sibling-for-ft
+    version: "1.0.0"
+    repository: file://../sibling-for-ft

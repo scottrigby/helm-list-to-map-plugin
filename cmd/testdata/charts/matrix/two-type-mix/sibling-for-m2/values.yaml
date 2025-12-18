@@ -1,0 +1,7 @@
+env:
+  - name: SIBLING_M2_VAR
+    value: "default"
+volumes:
+  - name: config
+    configMap:
+      name: config

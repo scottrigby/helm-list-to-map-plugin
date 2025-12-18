@@ -1,0 +1,3 @@
+env:
+  - name: SIBLING_FT_VAR
+    value: "default"

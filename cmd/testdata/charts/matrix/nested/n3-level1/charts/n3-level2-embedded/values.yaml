@@ -1,0 +1,3 @@
+env:
+  - name: L2_EMBEDDED_VAR
+    value: "default"

@@ -1,0 +1,3 @@
+env:
+  - name: DEEPLY_NESTED_VAR
+    value: "default"

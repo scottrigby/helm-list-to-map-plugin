@@ -88,6 +88,19 @@ Before pushing changes:
 make test
 ```
 
+### Maintaining Test Fixtures
+
+**When adding or modifying subchart dependency tests:**
+
+The subchart test matrix is documented in `cmd/testdata/charts/matrix/README.md`. If you add new subchart test scenarios or modify existing fixtures:
+
+1. Add/update the test fixture in the appropriate matrix subdirectory
+2. Write the corresponding test in `cmd/subchart_test.go`
+3. **Update `cmd/testdata/charts/matrix/README.md`** with the new scenario
+4. Run `make test-cmd` to verify
+
+This ensures the test matrix documentation stays current and contributors understand the rationale for each test fixture.
+
 ## Updating Documentation
 
 After changing CLI help text, update the README:

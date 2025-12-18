@@ -1,0 +1,8 @@
+apiVersion: v2
+name: d-fc
+description: Deduplication test - file:// pointing to charts/shared
+version: 1.0.0
+dependencies:
+  - name: shared
+    version: "1.0.0"
+    repository: file://./charts/shared

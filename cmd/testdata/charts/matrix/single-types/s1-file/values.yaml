@@ -1,0 +1,7 @@
+appName: parent-app
+
+# Override sibling-chart values
+sibling-chart:
+  env:
+    - name: PARENT_VAR
+      value: "from-parent"

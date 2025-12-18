@@ -1,0 +1,8 @@
+apiVersion: v2
+name: m3-all
+description: All three dependency types (file://, charts/, tarball)
+version: 1.0.0
+dependencies:
+  - name: sibling-for-m3
+    version: "1.0.0"
+    repository: file://../sibling-for-m3

@@ -1,0 +1,8 @@
+env:
+  - name: L1_VAR
+    value: "level1-default"
+
+level2-chart:
+  env:
+    - name: L1_OVERRIDE
+      value: "from-l1"

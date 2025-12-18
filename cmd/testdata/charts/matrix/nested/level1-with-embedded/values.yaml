@@ -1,0 +1,8 @@
+env:
+  - name: L1_VAR
+    value: "default"
+
+nested-embedded:
+  env:
+    - name: NESTED_VAR
+      value: "default"

@@ -1,0 +1,6 @@
+env:
+  - name: EMBEDDED_C_VAR
+    value: "default"
+volumes:
+  - name: data
+    emptyDir: {}

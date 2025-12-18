@@ -1,0 +1,13 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shared
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          env:
+            {{- toYaml .Values.env | nindent 12 }}
+      volumes:
+        {{- toYaml .Values.volumes | nindent 8 }}

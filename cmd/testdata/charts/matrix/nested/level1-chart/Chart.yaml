@@ -1,0 +1,7 @@
+apiVersion: v2
+name: level1-chart
+version: 1.0.0
+dependencies:
+  - name: level2-chart
+    version: "1.0.0"
+    repository: file://../level2-chart

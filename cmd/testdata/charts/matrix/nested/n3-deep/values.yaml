@@ -1,0 +1,5 @@
+n3-level1:
+  n3-level2-file:
+    env:
+      - name: L0_DEEP_OVERRIDE
+        value: "from-root"

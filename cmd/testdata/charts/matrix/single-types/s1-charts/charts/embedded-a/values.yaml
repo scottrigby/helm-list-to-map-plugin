@@ -1,0 +1,10 @@
+# Subchart default values with convertible arrays
+env:
+  - name: EMBEDDED_VAR
+    value: "default"
+  - name: EMBEDDED_DB
+    value: "postgres"
+
+volumes:
+  - name: data
+    emptyDir: {}

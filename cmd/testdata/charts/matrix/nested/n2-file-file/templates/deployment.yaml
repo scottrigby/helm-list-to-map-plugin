@@ -1,0 +1,10 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: n2-parent
+spec:
+  template:
+    spec:
+      containers:
+        - name: main
+          image: nginx

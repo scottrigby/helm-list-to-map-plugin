@@ -1,0 +1,17 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embedded-a
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          image: app:1.0
+          env:
+            {{- toYaml .Values.env | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        {{- toYaml .Values.volumes | nindent 8 }}

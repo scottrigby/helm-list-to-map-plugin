@@ -1,5 +1,11 @@
-replicas: 1
+appName: m2-parent
 
-env:
-  - name: PARENT_VAR
-    value: "parent-value"
+sibling-for-m2:
+  env:
+    - name: FROM_FILE
+      value: "parent-override"
+
+embedded-c:
+  env:
+    - name: FROM_CHARTS
+      value: "parent-override"

@@ -1,0 +1,13 @@
+env:
+  - name: L1_VAR
+    value: "default"
+
+n3-level2-embedded:
+  env:
+    - name: L1_TO_EMBEDDED
+      value: "override"
+
+n3-level2-file:
+  env:
+    - name: L1_TO_FILE
+      value: "override"

@@ -1,0 +1,4 @@
+apiVersion: v2
+name: m2-charts-tarball
+description: Mix of charts/ directory and tarball dependencies
+version: 1.0.0

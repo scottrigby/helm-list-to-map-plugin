@@ -1,0 +1,7 @@
+apiVersion: v2
+name: n2-file-charts
+version: 1.0.0
+dependencies:
+  - name: level1-with-embedded
+    version: "1.0.0"
+    repository: file://../level1-with-embedded

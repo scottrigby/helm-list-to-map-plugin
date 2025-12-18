@@ -1,0 +1,3 @@
+env:
+  - name: SIBLING_M3_VAR
+    value: "default"

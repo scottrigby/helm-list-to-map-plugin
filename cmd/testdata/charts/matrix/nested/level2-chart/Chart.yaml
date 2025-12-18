@@ -1,0 +1,3 @@
+apiVersion: v2
+name: level2-chart
+version: 1.0.0

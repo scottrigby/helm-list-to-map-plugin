@@ -1,5 +1,8 @@
-replicas: 1
+# Main chart values
+appName: parent-app
 
-env:
-  - name: PARENT_VAR
-    value: "parent-value"
+# Override embedded-a subchart values
+embedded-a:
+  env:
+    - name: PARENT_OVERRIDE
+      value: "from-parent"

@@ -1,0 +1,6 @@
+env:
+  - name: SHARED_DEFAULT
+    value: "default"
+volumes:
+  - name: shared-data
+    emptyDir: {}
