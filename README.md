@@ -79,11 +79,41 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for design details.
 
 ## Installation
 
-```bash
-helm plugin install https://github.com/yourorg/list-to-map
-```
+### From a Release
 
-Or build from source:
+Eg, [v1.0.0-alpha.2](https://github.com/scottrigby/helm-list-to-map-plugin/releases/tag/v1.0.0-alpha.2):
+
+1. Download public PGP key the release was signed with:
+
+  Releases for this plugin are signed with `208D D36E D5BB 3745 A167 43A4 C7C6 FBB5 B91C 1155` and can be found at @scottrigby [keybase account](https://keybase.io/r6by). Use the attached signature with this figerprint for verifying releases. Note you will need to dearmor asc to gpg format:
+
+  ```console
+  % curl -O "https://keybase.io/r6by/pgp_keys.asc?fingerprint=208dd36ed5bb3745a16743a4c7c6fbb5b91c1155"
+  % cat pgp_keys.asc | gpg --dearmor | tee pgp_keys.gpg | hexdump -C | head
+  ```
+2. Install and verify with public key:
+
+  ```console
+  % helm plugin install https://github.com/scottrigby/helm-list-to-map-plugin/releases/download/v1.0.0-alpha.2/list-to-map-1.0.0-alpha.2.tgz --keyring pgp_keys.gpg
+  Verifying plugin signature...
+  Signed by: Scott Rigby <scott@r6by.com>
+  Using Key With Fingerprint: 208DD36ED5BB3745A16743A4C7C6FBB5B91C1155
+  Plugin Hash Verified: sha256:12ccaefca5e6e29ee4e9ef89a2887058d9b127144e018bec8634cb205a4f30d3
+  Building list-to-map...
+  CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=v1.0.0-alpha.2" -trimpath -o bin/list-to-map ./cmd
+  Installed plugin: list-to-map
+  ```
+
+  You can also verify a downloaded plugin at any time with:
+
+  ```console
+  % helm plugin verify $(helm env HELM_PLUGINS)/list-to-map-1.0.0-alpha.2.tgz --keyring pgp_keys.gpg
+  Signed by: Scott Rigby <scott@r6by.com>
+  Using Key With Fingerprint: 208DD36ED5BB3745A16743A4C7C6FBB5B91C1155
+  Plugin Hash Verified: sha256:12ccaefca5e6e29ee4e9ef89a2887058d9b127144e018bec8634cb205a4f30d3
+  ```
+
+### Or build from source:
 
 ```bash
 git clone https://github.com/yourorg/list-to-map
